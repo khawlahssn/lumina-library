@@ -1,5 +1,7 @@
 package models
 
+import "github.com/tkanos/gonfig"
+
 var (
 	CEX_SOURCE        = SourceType("CEX")
 	DEX_SOURCE        = SourceType("DEX")
@@ -19,6 +21,38 @@ type Exchange struct {
 	Bridge      bool   `json:"Bridge"`
 	Contract    string `json:"Contract"`
 	Blockchain  string `json:"Blockchain"`
+}
+
+// GetSymbolIdentificationMap returns a map which maps an asset's symbol ticker from @exchange onto the underlying asset.
+// It assumes symbol mappings can be found in the file exchange.json at @configPath.
+func GetSymbolIdentificationMap(exchange string, configPath string) (map[string]Asset, error) {
+	identificationMap := make(map[string]Asset)
+	type IdentifiedAsset struct {
+		Exchange   string
+		Symbol     string
+		Blockchain string
+		Address    string
+		Decimals   uint8
+	}
+	type IdentifiedAssets struct {
+		Tokens []IdentifiedAsset
+	}
+	var identifiedAssets IdentifiedAssets
+	path := configPath + exchange + ".json"
+	err := gonfig.GetConf(path, &identifiedAssets)
+	if err != nil {
+		return identificationMap, err
+	}
+
+	for _, t := range identifiedAssets.Tokens {
+		identificationMap[ExchangeSymbolIdentifier(t.Symbol, t.Exchange)] = Asset{
+			Symbol:     t.Symbol,
+			Blockchain: t.Blockchain,
+			Address:    t.Address,
+			Decimals:   t.Decimals,
+		}
+	}
+	return identificationMap, nil
 }
 
 // GetSourceType returns the type of @exchange such as DEX. For CEX an empty SourceType is returned.

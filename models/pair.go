@@ -33,14 +33,17 @@ func (p *Pair) Identifier() string {
 
 // ExchangePairsFromEnv parses the string @exchangePairsEnv consisting of pairs on exchanges
 // and returns full asset information for the corresponding exchangepairs.
+// It assumes mappings can be found in the files exchange.json at @configPath where
+// @exchange is the corresponding exchange name.
 func ExchangePairsFromEnv(
 	exchangePairsEnv string,
 	envSeparator string,
 	exchangePairSeparator string,
 	pairTickerSeparator string,
+	configPath string,
 ) (exchangePairs []ExchangePair) {
 
-	// epMap maps an exchange on the underlying pair symbol tickers.
+	// epMap maps an exchange on a slice of the underlying pair symbol tickers.
 	epMap := make(map[string][]string)
 	for _, ep := range strings.Split(exchangePairsEnv, envSeparator) {
 		exchange := strings.TrimSpace(strings.Split(ep, exchangePairSeparator)[0])
@@ -50,7 +53,7 @@ func ExchangePairsFromEnv(
 
 	// Assign assets to pair symbols.
 	for exchange := range epMap {
-		symbolIdentificationMap, err := GetSymbolIdentificationMap(exchange)
+		symbolIdentificationMap, err := GetSymbolIdentificationMap(exchange, configPath)
 		if err != nil {
 			log.Fatal("GetSymbolIdentificationMap: ", err)
 		}
@@ -88,74 +91,6 @@ func MakeTickerPairMap(exchangePairs []ExchangePair) map[string]Pair {
 		tickerPairMap[symbols[0]+symbols[1]] = ep.UnderlyingPair
 	}
 	return tickerPairMap
-}
-
-func GetPairsFromConfig(exchange string) ([]ExchangePair, error) {
-	path := utils.GetPath("pairs/", exchange)
-	type exchangepairsymbols struct {
-		ForeignName string
-		QuoteSymbol string
-		BaseSymbol  string
-	}
-	type ExchangePairSymbols struct {
-		Pairs []exchangepairsymbols
-	}
-	var (
-		p             ExchangePairSymbols
-		exchangePairs []ExchangePair
-	)
-	err := gonfig.GetConf(path, &p)
-	if err != nil {
-		return []ExchangePair{}, err
-	}
-
-	symbolIdentificationMap, err := GetSymbolIdentificationMap(exchange)
-	if err != nil {
-		return exchangePairs, err
-	}
-
-	for _, exchangepairsymbol := range p.Pairs {
-		var ep ExchangePair
-		ep.Exchange = exchange
-		ep.ForeignName = exchangepairsymbol.ForeignName
-		ep.Symbol = exchangepairsymbol.QuoteSymbol
-
-		ep.UnderlyingPair.QuoteToken = symbolIdentificationMap[ExchangeSymbolIdentifier(ep.Symbol, ep.Exchange)]
-		ep.UnderlyingPair.BaseToken = symbolIdentificationMap[ExchangeSymbolIdentifier(exchangepairsymbol.BaseSymbol, ep.Exchange)]
-		exchangePairs = append(exchangePairs, ep)
-	}
-	return exchangePairs, nil
-}
-
-// GetSymbolIdentificationMap returns a map which maps an asset's symbol ticker on @exchange onto the underlying asset.
-func GetSymbolIdentificationMap(exchange string) (map[string]Asset, error) {
-	identificationMap := make(map[string]Asset)
-	type IdentifiedAsset struct {
-		Exchange   string
-		Symbol     string
-		Blockchain string
-		Address    string
-		Decimals   uint8
-	}
-	type IdentifiedAssets struct {
-		Tokens []IdentifiedAsset
-	}
-	var identifiedAssets IdentifiedAssets
-	path := utils.GetPath("symbolIdentification/", exchange)
-	err := gonfig.GetConf(path, &identifiedAssets)
-	if err != nil {
-		return identificationMap, err
-	}
-
-	for _, t := range identifiedAssets.Tokens {
-		identificationMap[ExchangeSymbolIdentifier(t.Symbol, t.Exchange)] = Asset{
-			Symbol:     t.Symbol,
-			Blockchain: t.Blockchain,
-			Address:    t.Address,
-			Decimals:   t.Decimals,
-		}
-	}
-	return identificationMap, nil
 }
 
 func ExchangeSymbolIdentifier(symbol string, exchange string) string {
