@@ -74,6 +74,7 @@ func NewMetrics(reg prometheus.Registerer, pushGatewayURL, jobName, authUser, au
 	reg.MustRegister(m.cpuUsage)
 	reg.MustRegister(m.memoryUsage)
 	reg.MustRegister(m.Contract)
+	reg.MustRegister(m.ExchangePairs)
 	reg.MustRegister(m.gasBalance)
 	reg.MustRegister(m.lastUpdateTime)
 	return m
