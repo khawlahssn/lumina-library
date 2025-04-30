@@ -16,7 +16,7 @@ type Metrics struct {
 	ExchangePairs  *prometheus.GaugeVec
 	gasBalance     prometheus.Gauge
 	lastUpdateTime prometheus.Gauge
-	chainID        *prometheus.GaugeVec
+	chainID        prometheus.Gauge
 	pushGatewayURL string
 	jobName        string
 	authUser       string
@@ -66,14 +66,11 @@ func NewMetrics(reg prometheus.Registerer, pushGatewayURL, jobName, authUser, au
 			Name:      "last_update_time",
 			Help:      "Last update time in UTC timestamp.'",
 		}),
-		chainID: prometheus.NewGaugeVec(
-			prometheus.GaugeOpts{
-				Namespace: "feeder",
-				Name:      "chain_id",
-				Help:      "The chain ID of the blockchain being monitored.",
-			},
-			[]string{"chain_id"},
-		),
+		chainID: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "feeder",
+			Name:      "chain_id",
+			Help:      "The chain ID of the blockchain being monitored.",
+		}),
 		pushGatewayURL: pushGatewayURL,
 		jobName:        jobName,
 		authUser:       authUser,
@@ -88,8 +85,7 @@ func NewMetrics(reg prometheus.Registerer, pushGatewayURL, jobName, authUser, au
 	reg.MustRegister(m.lastUpdateTime)
 	reg.MustRegister(m.chainID)
 
-	// Set the constant chainID value
-	m.chainID.WithLabelValues("chain_id").Set(float64(chainID))
+	m.chainID.Set(float64(chainID))
 
 	return m
 }
