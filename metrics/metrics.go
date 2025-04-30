@@ -23,7 +23,7 @@ type Metrics struct {
 	authPassword   string
 }
 
-func NewMetrics(reg prometheus.Registerer, pushGatewayURL, jobName, authUser, authPassword string, chainID int64) *Metrics {
+func NewMetrics(reg *prometheus.Registry, pushGatewayURL, jobName, authUser, authPassword string, chainID int64) *Metrics {
 	m := &Metrics{
 		uptime: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "feeder",
