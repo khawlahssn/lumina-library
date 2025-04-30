@@ -16,13 +16,14 @@ type Metrics struct {
 	ExchangePairs  *prometheus.GaugeVec
 	gasBalance     prometheus.Gauge
 	lastUpdateTime prometheus.Gauge
+	chainID        *prometheus.GaugeVec
 	pushGatewayURL string
 	jobName        string
 	authUser       string
 	authPassword   string
 }
 
-func NewMetrics(reg prometheus.Registerer, pushGatewayURL, jobName, authUser, authPassword string) *Metrics {
+func NewMetrics(reg prometheus.Registerer, pushGatewayURL, jobName, authUser, authPassword string, chainID int64) *Metrics {
 	m := &Metrics{
 		uptime: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "feeder",
@@ -65,6 +66,14 @@ func NewMetrics(reg prometheus.Registerer, pushGatewayURL, jobName, authUser, au
 			Name:      "last_update_time",
 			Help:      "Last update time in UTC timestamp.'",
 		}),
+		chainID: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: "feeder",
+				Name:      "chain_id",
+				Help:      "The chain ID of the blockchain being monitored.",
+			},
+			[]string{"chain_id"},
+		),
 		pushGatewayURL: pushGatewayURL,
 		jobName:        jobName,
 		authUser:       authUser,
@@ -77,6 +86,11 @@ func NewMetrics(reg prometheus.Registerer, pushGatewayURL, jobName, authUser, au
 	reg.MustRegister(m.ExchangePairs)
 	reg.MustRegister(m.gasBalance)
 	reg.MustRegister(m.lastUpdateTime)
+	reg.MustRegister(m.chainID)
+
+	// Set the constant chainID value
+	m.chainID.WithLabelValues("chain_id").Set(float64(chainID))
+
 	return m
 }
 
@@ -94,6 +108,7 @@ func StartPrometheusServer(m *Metrics, port string) {
 	prometheus.DefaultRegisterer.MustRegister(m.ExchangePairs)
 	prometheus.DefaultRegisterer.MustRegister(m.gasBalance)
 	prometheus.DefaultRegisterer.MustRegister(m.lastUpdateTime)
+	prometheus.DefaultRegisterer.MustRegister(m.chainID)
 
 	log.Printf("Starting metrics server on :%s", port)
 	http.Handle("/metrics", promhttp.Handler())
