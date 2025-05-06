@@ -7,7 +7,8 @@ import (
 )
 
 const (
-	UNISWAP_SIMULATION = "UniswapSimulation"
+	UNISWAP_SIMULATION      = "UniswapSimulation1"
+	UNISWAP_SIMULATION_TEST = "UniswapSimulation"
 )
 
 var (
@@ -18,6 +19,7 @@ var (
 func init() {
 
 	Exchanges[UNISWAP_SIMULATION] = models.Exchange{Name: UNISWAP_SIMULATION, Centralized: false, Simulation: true, Blockchain: utils.ETHEREUM}
+	Exchanges[UNISWAP_SIMULATION_TEST] = models.Exchange{Name: UNISWAP_SIMULATION_TEST, Centralized: false, Simulation: true, Blockchain: utils.ETHEREUM}
 
 	log = logrus.New()
 	loglevel, err := logrus.ParseLevel(utils.Getenv("LOG_LEVEL_SCRAPERS", "info"))
