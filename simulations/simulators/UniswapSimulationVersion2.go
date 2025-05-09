@@ -433,20 +433,20 @@ func (scraper *SimulationScraperVersion2) updateFeesMapVersion2(lock *sync.RWMut
 			// 2. check distribution of active ticks.
 			// 3. check prices in current tick across pools/fees.
 
-			// balanceOk := scraper.checkBalancesVersion2(quoteToken, baseToken, poolAddress)
-			// if utils.ContainsAddress(whitelistedPools, poolAddress) {
-			// 	balanceOk = true
-			// }
-			// if !balanceOk {
-			// 	log.Warnf("Balances not ok for pool with fee %v%%", float64(fee.Int64())/float64(10000))
-			// 	// Remove from scraper.feesMap[ep] if existent.
-			// 	if containsAddress(poolAddress, scraper.feesMap[ep]) {
-			// 		log.Warn("low balance - remove pool from set of admissible pools: ", poolAddress)
-			// 		cleanedFees := removeFeeByAddress(poolAddress, scraper.feesMap[ep])
-			// 		scraper.feesMap[ep] = cleanedFees
-			// 	}
-			// 	continue
-			// }
+			balanceOk := scraper.checkBalancesVersion2(quoteToken, baseToken, poolAddress)
+			if utils.ContainsAddress(whitelistedPools, poolAddress) {
+				balanceOk = true
+			}
+			if !balanceOk {
+				log.Warnf("Balances not ok for pool with fee %v%%", float64(fee.Int64())/float64(10000))
+				// Remove from scraper.feesMap[ep] if existent.
+				if containsAddress(poolAddress, scraper.feesMap[ep]) {
+					log.Warn("low balance - remove pool from set of admissible pools: ", poolAddress)
+					cleanedFees := removeFeeByAddress(poolAddress, scraper.feesMap[ep])
+					scraper.feesMap[ep] = cleanedFees
+				}
+				continue
+			}
 
 			// ticksOk, currentTick := scraper.checkTicks(poolAddress, word_Range, considered_tick_range, admissible_Count)
 			// if utils.ContainsAddress(whitelistedPools, poolAddress) {
