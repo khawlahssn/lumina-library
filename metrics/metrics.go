@@ -27,7 +27,12 @@ type Metrics struct {
 
 // GetImageVersion returns the Docker image version from environment variable
 func GetImageVersion() string {
-	version := os.Getenv("IMAGE_VERSION")
+	// First check IMAGE_TAG (for docker-compose)
+	version := os.Getenv("IMAGE_TAG")
+	if version == "" {
+		// If not found, check REPOSITORY_TAG (for helm)
+		version = os.Getenv("REPOSITORY_TAG")
+	}
 	if version == "" {
 		version = "unknown" // fallback if not set
 	}
@@ -107,6 +112,7 @@ func NewMetrics(reg *prometheus.Registry, pushGatewayURL, jobName, authUser, aut
 
 	// Set the chain ID and image version initial values
 	m.chainID.Set(float64(chainID))
+	log.Infof("Setting Docker image version metric to: %s", imageVersion)
 	m.imageVersion.WithLabelValues(imageVersion).Set(1)
 
 	return m
