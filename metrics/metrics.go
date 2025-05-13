@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"net/http"
-	"os"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -23,20 +22,6 @@ type Metrics struct {
 	jobName        string
 	authUser       string
 	authPassword   string
-}
-
-// GetImageVersion returns the Docker image version from environment variable
-func GetImageVersion() string {
-	// First check IMAGE_TAG (for docker-compose)
-	version := os.Getenv("IMAGE_TAG")
-	if version == "" {
-		// If not found, check REPOSITORY_TAG (for helm)
-		version = os.Getenv("REPOSITORY_TAG")
-	}
-	if version == "" {
-		version = "unknown" // fallback if not set
-	}
-	return version
 }
 
 func NewMetrics(reg *prometheus.Registry, pushGatewayURL, jobName, authUser, authPassword string, chainID int64, imageVersion string) *Metrics {
@@ -110,9 +95,7 @@ func NewMetrics(reg *prometheus.Registry, pushGatewayURL, jobName, authUser, aut
 	reg.MustRegister(m.chainID)
 	reg.MustRegister(m.imageVersion)
 
-	// Set the chain ID and image version initial values
 	m.chainID.Set(float64(chainID))
-	log.Infof("Setting Docker image version metric to: %s", imageVersion)
 	m.imageVersion.WithLabelValues(imageVersion).Set(1)
 
 	return m
