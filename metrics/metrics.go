@@ -105,6 +105,7 @@ func NewMetrics(reg *prometheus.Registry, pushGatewayURL, jobName, authUser, aut
 	reg.MustRegister(m.chainID)
 	reg.MustRegister(m.imageVersion)
 
+	// Set the chain ID and image version initial values
 	m.chainID.Set(float64(chainID))
 	m.imageVersion.WithLabelValues(imageVersion).Set(1)
 
