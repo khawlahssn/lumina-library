@@ -17,13 +17,14 @@ type Metrics struct {
 	gasBalance     prometheus.Gauge
 	lastUpdateTime prometheus.Gauge
 	chainID        prometheus.Gauge
+	imageVersion   *prometheus.GaugeVec
 	pushGatewayURL string
 	jobName        string
 	authUser       string
 	authPassword   string
 }
 
-func NewMetrics(reg *prometheus.Registry, pushGatewayURL, jobName, authUser, authPassword string, chainID int64) *Metrics {
+func NewMetrics(reg *prometheus.Registry, pushGatewayURL, jobName, authUser, authPassword string, chainID int64, imageVersion string) *Metrics {
 	m := &Metrics{
 		uptime: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "feeder",
@@ -71,6 +72,14 @@ func NewMetrics(reg *prometheus.Registry, pushGatewayURL, jobName, authUser, aut
 			Name:      "chain_id",
 			Help:      "The chain ID of the blockchain being monitored.",
 		}),
+		imageVersion: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace: "feeder",
+				Name:      "image_version",
+				Help:      "The Docker image version of the feeder.",
+			},
+			[]string{"version"},
+		),
 		pushGatewayURL: pushGatewayURL,
 		jobName:        jobName,
 		authUser:       authUser,
@@ -84,8 +93,10 @@ func NewMetrics(reg *prometheus.Registry, pushGatewayURL, jobName, authUser, aut
 	reg.MustRegister(m.gasBalance)
 	reg.MustRegister(m.lastUpdateTime)
 	reg.MustRegister(m.chainID)
+	reg.MustRegister(m.imageVersion)
 
 	m.chainID.Set(float64(chainID))
+	m.imageVersion.WithLabelValues(imageVersion).Set(1)
 
 	return m
 }
@@ -105,6 +116,7 @@ func StartPrometheusServer(m *Metrics, port string) {
 	prometheus.DefaultRegisterer.MustRegister(m.gasBalance)
 	prometheus.DefaultRegisterer.MustRegister(m.lastUpdateTime)
 	prometheus.DefaultRegisterer.MustRegister(m.chainID)
+	prometheus.DefaultRegisterer.MustRegister(m.imageVersion)
 
 	log.Printf("Starting metrics server on :%s", port)
 	http.Handle("/metrics", promhttp.Handler())
