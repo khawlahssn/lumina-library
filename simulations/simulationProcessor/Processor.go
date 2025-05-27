@@ -83,7 +83,7 @@ func Processor(
 		if removedFilterPoints > 0 {
 			log.Warnf("Processor - Removed %v old filter points.", removedFilterPoints)
 		}
-
+		filterPoints = models.RemoveLargeDeviationPrices(filterPoints)
 		// --------------------------------------------------------------------------------------------
 		// 2. Compute an aggregated value across exchanges for each asset obtained from the aggregated
 		// filter values in Step 1.

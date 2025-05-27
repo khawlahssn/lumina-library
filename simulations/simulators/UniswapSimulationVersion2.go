@@ -388,6 +388,7 @@ func (scraper *SimulationScraperVersion2) initAssetsAndMapsVersion2() error {
 		if _, ok := memoryMap[ep.UnderlyingPair.QuoteToken.Address]; !ok {
 
 			quoteToken, err := models.GetAsset(common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address), Exchanges[UNISWAP_SIMULATION_TEST].Blockchain, scraper.restClient)
+			log.Warnf("Blockchain: %v\n", Exchanges[UNISWAP_SIMULATION_TEST].Blockchain)
 			if err != nil {
 				return err
 			}
@@ -402,6 +403,7 @@ func (scraper *SimulationScraperVersion2) initAssetsAndMapsVersion2() error {
 		if _, ok := memoryMap[ep.UnderlyingPair.BaseToken.Address]; !ok {
 
 			baseToken, err := models.GetAsset(common.HexToAddress(ep.UnderlyingPair.BaseToken.Address), Exchanges[UNISWAP_SIMULATION_TEST].Blockchain, scraper.restClient)
+			log.Warnf("Blockchain: %v\n", Exchanges[UNISWAP_SIMULATION_TEST].Blockchain)
 			if err != nil {
 				return err
 			}
@@ -579,18 +581,18 @@ func (scraper *SimulationScraperVersion2) updateFeesMapVersion2(lock *sync.RWMut
 		}
 
 		// Compute amountIn in such that it corresponds to @amountIn_USD amount in USD.
-		// baseTokenPrice := scraper.priceMap[ep.UnderlyingPair.BaseToken].Price
-		baseTokenPrice, err := utils.GetPriceFromDiaAPI(ep.UnderlyingPair.BaseToken.Address, ep.UnderlyingPair.BaseToken.Blockchain)
-
-		if err != nil {
-			log.Errorf("Failed to get baseTokenPrice: %v\n", err)
-			log.Errorf("baseToken Blockchain: %v\n", ep.UnderlyingPair.BaseToken.Blockchain)
-			log.Errorf("baseToken Address: %v\n", ep.UnderlyingPair.BaseToken.Address)
-		}
+		baseTokenPrice := scraper.priceMap[ep.UnderlyingPair.BaseToken].Price
 
 		if baseTokenPrice == 0 {
-			log.Warnf("Could not determine price of base token %s. Continue with native volume of 1.", ep.UnderlyingPair.BaseToken.Symbol)
-			baseTokenPrice = 100
+			log.Warnf("Could not determine price of base token on chain %s. Checking DIA API.", ep.UnderlyingPair.BaseToken.Symbol)
+			baseTokenPrice, err = utils.GetPriceFromDiaAPI(ep.UnderlyingPair.BaseToken.Address, ep.UnderlyingPair.BaseToken.Blockchain)
+			if err != nil {
+				log.Errorf("Failed to get baseTokenPrice from DIA API: %v\n", err)
+				log.Errorf("baseToken Blockchain: %v\n", ep.UnderlyingPair.BaseToken.Blockchain)
+				log.Errorf("baseToken Address: %v\n", ep.UnderlyingPair.BaseToken.Address)
+				log.Warnf("Could not determine price of base token from DIA API%s. Continue with native volume of 1.", ep.UnderlyingPair.BaseToken.Symbol)
+				baseTokenPrice = 100
+			}
 		}
 		for i := range scraper.feesMap[ep] {
 			lock.Lock()
