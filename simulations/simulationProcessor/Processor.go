@@ -83,7 +83,6 @@ func Processor(
 		if removedFilterPoints > 0 {
 			log.Warnf("Processor - Removed %v old filter points.", removedFilterPoints)
 		}
-
 		// --------------------------------------------------------------------------------------------
 		// 2. Compute an aggregated value across exchanges for each asset obtained from the aggregated
 		// filter values in Step 1.
@@ -94,6 +93,13 @@ func Processor(
 		switch metaFilterType {
 		// TO DO: Add methodology for metafilters of simulated data.
 		case "Median":
+			filterPointsMedianized := metafilters.Median(filterPoints)
+			filtersChannel <- filterPointsMedianized
+			for _, fpm := range filterPointsMedianized {
+				log.Infof("Processor - filter %s for %s: %v.", fpm.Name, fpm.Pair.QuoteToken.Symbol, fpm.Value)
+			}
+		case "MedianWithPriceFilter":
+			filterPoints = models.RemoveLargeDeviationPrices(filterPoints)
 			filterPointsMedianized := metafilters.Median(filterPoints)
 			filtersChannel <- filterPointsMedianized
 			for _, fpm := range filterPointsMedianized {
