@@ -616,8 +616,11 @@ func (scraper *SimulationScraperVersion2) updateFeesMapVersion2(lock *sync.RWMut
 		// Outlier detection on prices.
 		// TO DO: Should we also check for prices1?
 		// scraper.checkPricesVersion2(prices0, ep, indexFeeMap, poolMap)
+
 		for index, fee := range indexFeeMap {
-			scraper.feesMap[ep] = append(scraper.feesMap[ep], UniV3PoolFee{fee: fee, address: poolMap[index]})
+			if !containsFeeVersion2(fee, scraper.feesMap[ep]) {
+				scraper.feesMap[ep] = append(scraper.feesMap[ep], UniV3PoolFee{fee: fee, address: poolMap[index]})
+			}
 		}
 
 		// Compute amountIn in such that it corresponds to @amountIn_USD amount in USD.
