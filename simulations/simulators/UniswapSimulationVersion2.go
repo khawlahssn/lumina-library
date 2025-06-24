@@ -543,7 +543,6 @@ func (scraper *SimulationScraperVersion2) updateFeesMapVersion2(lock *sync.RWMut
 
 		var indexFeeMap = make(map[int]*big.Int)
 		// var prices0, prices1 []float64
-		var prices0 []float64
 		var poolMap = make(map[int]common.Address)
 
 		for i, fee := range allFeesVersion2 {
@@ -605,18 +604,24 @@ func (scraper *SimulationScraperVersion2) updateFeesMapVersion2(lock *sync.RWMut
 			// log.Infof("pool admitted %s for balances and ticks.", poolAddress.Hex())
 			// // --------------------
 
-			p0, _, err := scraper.getActivePricesVersion2(poolAddress, int8(quoteToken.Decimals), int8(baseToken.Decimals))
-			if err != nil {
-				log.Errorf("getActivePrices on %s: %v", poolAddress.Hex(), err)
-			}
-			prices0 = append(prices0, p0)
+			// p0, p1, err := scraper.getActivePricesVersion2(poolAddress, int8(quoteToken.Decimals), int8(baseToken.Decimals))
+			// if err != nil {
+			// 	log.Errorf("getActivePrices on %s: %v", poolAddress.Hex(), err)
+			// }
+			// prices0 = append(prices0, p0)
 			// prices1 = append(prices1, p1)
 			// log.Debugf("prices in current tick price0 -- price1: %v -- %v", prices0, prices1)
 		}
 
 		// Outlier detection on prices.
 		// TO DO: Should we also check for prices1?
-		scraper.checkPricesVersion2(prices0, ep, indexFeeMap, poolMap)
+		// scraper.checkPricesVersion2(prices0, ep, indexFeeMap, poolMap)
+
+		for index, fee := range indexFeeMap {
+			if !containsFeeVersion2(fee, scraper.feesMap[ep]) {
+				scraper.feesMap[ep] = append(scraper.feesMap[ep], UniV3PoolFee{fee: fee, address: poolMap[index]})
+			}
+		}
 
 		// Compute amountIn in such that it corresponds to @amountIn_USD amount in USD.
 		baseTokenPrice := scraper.priceMap[ep.UnderlyingPair.BaseToken].Price
@@ -828,13 +833,11 @@ func (scraper *SimulationScraperVersion2) checkTickCountVersion2(ticks []int32, 
 
 // getActivePrices returns prices of pool tokens in the currently active tick. Prices denomination is of course native.
 func (scraper *SimulationScraperVersion2) getActivePricesVersion2(poolAddress common.Address, decimals0 int8, decimals1 int8) (price0 float64, price1 float64, err error) {
-	poolData, err := scraper.poolCache.Get(poolAddress, scraper.restClient)
+	var caller *univ3pool.Univ3poolCaller
+	caller, err = univ3pool.NewUniv3poolCaller(poolAddress, scraper.restClient)
 	if err != nil {
-		log.Errorf("Failed to load pool data: %v", err)
 		return
 	}
-	caller := poolData.Caller
-
 	slot0, err := caller.Slot0(&bind.CallOpts{})
 	if err != nil {
 		return
