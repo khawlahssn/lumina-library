@@ -151,13 +151,13 @@ func (scraper *coinbaseScraper) handleWSResponse(message coinBaseWSResponse, loc
 	if len(pair) > 1 {
 		trade.QuoteToken = scraper.tickerPairMap[pair[0]+pair[1]].QuoteToken
 		trade.BaseToken = scraper.tickerPairMap[pair[0]+pair[1]].BaseToken
-	}
 
-	log.Tracef("CoinBase - got trade: %s -- %v -- %v -- %s.", trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol, trade.Price, trade.Volume, trade.ForeignTradeID)
-	lock.Lock()
-	scraper.lastTradeTimeMap[pair[0]+"-"+pair[1]] = trade.Time
-	lock.Unlock()
-	scraper.tradesChannel <- trade
+		log.Tracef("CoinBase - got trade: %s -- %v -- %v -- %s.", trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol, trade.Price, trade.Volume, trade.ForeignTradeID)
+		lock.Lock()
+		scraper.lastTradeTimeMap[pair[0]+"-"+pair[1]] = trade.Time
+		lock.Unlock()
+		scraper.tradesChannel <- trade
+	}
 
 }
 
