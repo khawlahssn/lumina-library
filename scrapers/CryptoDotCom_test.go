@@ -1,6 +1,7 @@
 package scrapers
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -137,5 +138,71 @@ func TestCryptodotcomParseTradeMessage(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCryptodotcomFetchTrades(t *testing.T) {
+	// Prepare mock websocket connection
+	mockWs := &mockWsConn{
+		readJSONQueue: []interface{}{
+			cryptodotcomWSResponse{
+				Method: "not_heartbeat",
+				Result: cryptodotcomWSResponseResult{
+					Data: []cryptodotcomWSResponseData{
+						{
+							TradeID:     "123",
+							Timestamp:   time.Now().UnixMilli(),
+							Price:       "1234.56",
+							Volume:      "10.5",
+							Side:        "BUY",
+							ForeignName: "BTC_USDT",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Setup tickerPairMap to match ForeignName
+	tickerPairMap := map[string]models.Pair{
+		"BTCUSDT": {
+			QuoteToken: models.Asset{Symbol: "BTC"},
+			BaseToken:  models.Asset{Symbol: "USDT"},
+		},
+	}
+
+	tradesCh := make(chan models.Trade, 1)
+	lock := &sync.RWMutex{}
+	scraper := &cryptodotcomScraper{
+		wsClient:            mockWs,
+		tradesChannel:       tradesCh,
+		subscribeChannel:    make(chan models.ExchangePair),
+		tickerPairMap:       tickerPairMap,
+		lastTradeTimeMap:    make(map[string]time.Time),
+		maxErrCount:         2,
+		restartWaitTime:     0,
+		tradeTimeoutSeconds: 10000, // ensure trade not filtered by age
+	}
+
+	// Run fetchTrades in goroutine
+	go scraper.fetchTrades(lock)
+
+	// Wait for result or timeout
+	select {
+	case trade := <-tradesCh:
+		if trade.Price != 1234.56 {
+			t.Errorf("unexpected trade price: got %v", trade.Price)
+		}
+		if trade.Volume != 10.5 {
+			t.Errorf("unexpected trade volume: got %v", trade.Volume)
+		}
+		if trade.ForeignTradeID != "123" {
+			t.Errorf("unexpected trade ForeignTradeID: got %v", trade.ForeignTradeID)
+		}
+		if trade.QuoteToken.Symbol != "BTC" || trade.BaseToken.Symbol != "USDT" {
+			t.Errorf("unexpected tokens: %v, %v", trade.QuoteToken, trade.BaseToken)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for trade")
 	}
 }

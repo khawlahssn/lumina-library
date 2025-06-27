@@ -2,6 +2,7 @@ package scrapers
 
 import (
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -112,5 +113,81 @@ func TestBinanceParseWSResponse(t *testing.T) {
 				t.Errorf("ForeignTradeID: got %v, want %v", got.ForeignTradeID, tc.expect.ForeignTradeID)
 			}
 		})
+	}
+}
+
+func TestSubscribe(t *testing.T) {
+	lock := &sync.RWMutex{}
+	mockWs := &mockWsConn{}
+	scraper := &binanceScraper{
+		wsClient: mockWs,
+	}
+	pair := models.ExchangePair{
+		ForeignName: "BTC-USDT",
+	}
+	// Test subscribe
+	err := scraper.subscribe(pair, true, lock)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(mockWs.writeJSONCalls) != 1 {
+		t.Errorf("expected WriteJSON to be called once")
+	}
+	// Test unsubscribe
+	err = scraper.subscribe(pair, false, lock)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(mockWs.writeJSONCalls) != 2 {
+		t.Errorf("expected WriteJSON to be called twice")
+	}
+}
+
+func TestFetchTrades(t *testing.T) {
+	// Prepare the mock websocket with a valid trade message
+	mockWs := &mockWsConn{
+		readJSONQueue: []interface{}{
+			binanceWSResponse{
+				Timestamp:      1620000000000, // ms timestamp
+				Price:          "123.45",
+				Volume:         "6.78",
+				ForeignTradeID: 99,
+				ForeignName:    "BTCUSDT",
+				Type:           "trade", // just needs to be non-nil
+				Buy:            true,
+			},
+		},
+	}
+
+	// Add a dummy mapping for tickerPairMap
+	pair := models.Pair{}
+	tickerMap := map[string]models.Pair{
+		"BTCUSDT": pair,
+	}
+
+	scraper := &binanceScraper{
+		wsClient:         mockWs,
+		tradesChannel:    make(chan models.Trade, 1),
+		tickerPairMap:    tickerMap,
+		lastTradeTimeMap: make(map[string]time.Time),
+	}
+
+	var lock sync.RWMutex
+	go scraper.fetchTrades(&lock)
+
+	select {
+	case trade := <-scraper.tradesChannel:
+		// Assert the main trade fields
+		if trade.Price != 123.45 {
+			t.Errorf("expected price 123.45, got %v", trade.Price)
+		}
+		if trade.Volume != 6.78 {
+			t.Errorf("expected volume 6.78, got %v", trade.Volume)
+		}
+		if trade.ForeignTradeID != "99" {
+			t.Errorf("expected ForeignTradeID '99', got %v", trade.ForeignTradeID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected trade, got none")
 	}
 }

@@ -1,8 +1,12 @@
 package scrapers
 
 import (
+	"strconv"
+	"sync"
 	"testing"
 	"time"
+
+	models "github.com/diadata-org/lumina-library/models"
 )
 
 func TestParseKuCoinTradeMessage(t *testing.T) {
@@ -97,5 +101,64 @@ func TestParseKuCoinTradeMessage(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestKucoinFetchTrades(t *testing.T) {
+	mockWs := &mockWsConn{}
+	tradesCh := make(chan models.Trade, 1)
+	pairMap := map[string]models.Pair{
+		"ETHUSDT": {
+			QuoteToken: models.Asset{Symbol: "ETH"},
+			BaseToken:  models.Asset{Symbol: "USDT"},
+		},
+	}
+
+	nowMs := int(time.Now().UnixNano() / 1e6)
+
+	mockWs.readJSONQueue = []interface{}{
+		kuCoinWSResponse{
+			Type: "pong",
+		},
+		kuCoinWSResponse{
+			Type: "message",
+			Data: kuCoinWSData{
+				Symbol:  "ETH-USDT",
+				Side:    "buy",
+				Price:   "3620.42",
+				Size:    "0.19",
+				TradeID: "12345",
+				Time:    strconv.Itoa(nowMs),
+			},
+		},
+	}
+
+	scraper := &kucoinScraper{
+		wsClient:         mockWs,
+		tradesChannel:    tradesCh,
+		tickerPairMap:    pairMap,
+		lastTradeTimeMap: map[string]time.Time{},
+	}
+
+	var lock sync.RWMutex
+
+	go scraper.fetchTrades(&lock)
+
+	select {
+	case trade := <-tradesCh:
+		if trade.Price != 3620.42 {
+			t.Errorf("expected price 3620.42, got %v", trade.Price)
+		}
+		if trade.Volume != 0.19 {
+			t.Errorf("expected volume 0.19, got %v", trade.Volume)
+		}
+		if trade.QuoteToken.Symbol != "ETH" || trade.BaseToken.Symbol != "USDT" {
+			t.Errorf("unexpected tokens: %+v, %+v", trade.QuoteToken, trade.BaseToken)
+		}
+		if trade.ForeignTradeID != "12345" {
+			t.Errorf("unexpected ForeignTradeID: %v", trade.ForeignTradeID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("did not receive trade")
 	}
 }

@@ -2,6 +2,7 @@ package scrapers
 
 import (
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,5 +130,65 @@ func TestHandleWSResponse_GateIO(t *testing.T) {
 				t.Errorf("BaseToken: got %+v, want %+v", got.BaseToken, tc.expect.BaseToken)
 			}
 		})
+	}
+}
+
+func TestGateIOFetchTrades(t *testing.T) {
+	mockWs := &mockWsConn{}
+	tradesCh := make(chan models.Trade, 1)
+	pairMap := map[string]models.Pair{
+		"BTCUSDT": {
+			QuoteToken: models.Asset{Symbol: "BTC"},
+			BaseToken:  models.Asset{Symbol: "USDT"},
+		},
+	}
+
+	// Simulate a trade message as received from GateIO.
+	mockWs.readJSONQueue = []interface{}{
+		GateIOResponseTrade{
+			Result: struct {
+				ID           int    `json:"id"`
+				CreateTime   int    `json:"create_time"`
+				CreateTimeMs string `json:"create_time_ms"`
+				Side         string `json:"side"`
+				CurrencyPair string `json:"currency_pair"`
+				Amount       string `json:"amount"`
+				Price        string `json:"price"`
+			}{
+				ID:           1001,
+				CreateTime:   int(time.Now().Unix()),
+				CreateTimeMs: "",
+				Side:         "buy",
+				CurrencyPair: "BTC_USDT",
+				Amount:       "0.5",
+				Price:        "65000",
+			},
+		},
+	}
+
+	scraper := &gateIOScraper{
+		wsClient:         mockWs,
+		tradesChannel:    tradesCh,
+		tickerPairMap:    pairMap,
+		lastTradeTimeMap: map[string]time.Time{},
+	}
+
+	var lock sync.RWMutex
+
+	go scraper.fetchTrades(&lock)
+
+	select {
+	case trade := <-tradesCh:
+		if trade.Price != 65000 {
+			t.Errorf("expected price 100000, got %v", trade.Price)
+		}
+		if trade.Volume != 0.5 {
+			t.Errorf("expected volume 0.5, got %v", trade.Volume)
+		}
+		if trade.QuoteToken.Symbol != "BTC" || trade.BaseToken.Symbol != "USDT" {
+			t.Errorf("unexpected tokens: %+v, %+v", trade.QuoteToken, trade.BaseToken)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("did not receive trade")
 	}
 }

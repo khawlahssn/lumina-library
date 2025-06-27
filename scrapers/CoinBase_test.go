@@ -2,6 +2,7 @@ package scrapers
 
 import (
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -93,5 +94,53 @@ func TestCoinbaseParseTradeMessage(t *testing.T) {
 				t.Errorf("ForeignTradeID: got %v, want %v", got.ForeignTradeID, tc.expect.ForeignTradeID)
 			}
 		})
+	}
+}
+
+func TestCoinbaseFetchTrades(t *testing.T) {
+	// Prepare a valid trade message
+	mockWs := &mockWsConn{
+		readJSONQueue: []interface{}{
+			coinBaseWSResponse{
+				Type:      "match",
+				TradeID:   123,
+				Price:     "2567.01",
+				Size:      "0.55",
+				Time:      "2024-07-01T10:01:00.000000Z",
+				ProductID: "BTC-USD",
+				Side:      "buy",
+			},
+		},
+	}
+
+	// If handleWSResponse expects pair["BTCUSD"] etc., add it
+	pair := models.Pair{}
+	tickerMap := map[string]models.Pair{
+		"BTCUSD": pair,
+	}
+
+	scraper := &coinbaseScraper{
+		wsClient:         mockWs,
+		tradesChannel:    make(chan models.Trade, 1),
+		tickerPairMap:    tickerMap,
+		lastTradeTimeMap: make(map[string]time.Time),
+	}
+
+	var lock sync.RWMutex
+	go scraper.fetchTrades(&lock)
+
+	select {
+	case trade := <-scraper.tradesChannel:
+		if trade.Price != 2567.01 {
+			t.Errorf("expected price 2567.01, got %v", trade.Price)
+		}
+		if trade.Volume != 0.55 {
+			t.Errorf("expected volume 0.55, got %v", trade.Volume)
+		}
+		if trade.ForeignTradeID != "123" {
+			t.Errorf("expected ForeignTradeID '123', got %v", trade.ForeignTradeID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected trade, got none")
 	}
 }
