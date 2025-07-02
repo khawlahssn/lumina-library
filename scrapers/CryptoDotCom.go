@@ -253,7 +253,7 @@ func cryptodotcomParseTradeMessage(message cryptodotcomWSResponse) (trades []mod
 			return
 		}
 		if data.Side == "SELL" {
-			volume -= 1
+			volume *= -1
 		}
 		timestamp := time.Unix(0, data.Timestamp*1e6)
 		foreignTradeID := data.TradeID
