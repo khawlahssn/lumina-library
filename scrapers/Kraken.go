@@ -214,7 +214,7 @@ func parseKrakenTradeMessage(message krakenWSResponseData) (price float64, volum
 	price = message.Price
 	volume = message.Size
 	if message.Side == "sell" {
-		volume -= 1
+		volume *= -1
 	}
 	timestamp, err = time.Parse("2006-01-02T15:04:05.000000Z", message.Time)
 	if err != nil {

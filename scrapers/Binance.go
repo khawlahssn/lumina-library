@@ -240,7 +240,7 @@ func binanceParseWSResponse(message binanceWSResponse) (trade models.Trade) {
 		log.Errorf("Binance - Parse volume: %v.", err)
 	}
 	if !message.Buy {
-		trade.Volume -= 1
+		trade.Volume *= -1
 	}
 	trade.ForeignTradeID = strconv.Itoa(int(message.ForeignTradeID))
 	return
