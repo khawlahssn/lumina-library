@@ -7,9 +7,13 @@ import (
 
 type mockWsConn struct {
 	writeJSONCalls []interface{}
-	readJSONQueue  []interface{}
-	readJSONErrs   []error
-	closeCalled    bool
+	writeJSONErrs  []error
+
+	readJSONQueue []interface{}
+	readJSONErrs  []error
+
+	closeCalled bool
+	closeErr    error
 }
 
 func (m *mockWsConn) WriteJSON(v interface{}) error {

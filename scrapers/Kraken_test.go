@@ -1,6 +1,8 @@
 package scrapers
 
 import (
+	"context"
+	"errors"
 	"strconv"
 	"sync"
 	"testing"
@@ -87,6 +89,78 @@ func TestParseKrakenTradeMessage(t *testing.T) {
 	}
 }
 
+func TestKrakenTradesChannel(t *testing.T) {
+	s := &krakenScraper{tradesChannel: make(chan models.Trade)}
+	if s.TradesChannel() == nil {
+		t.Fatal("expected non-nil channel")
+	}
+}
+
+func TestKrakenSubscribe(t *testing.T) {
+	lock := &sync.RWMutex{}
+	mockWs := &mockWsConn{}
+	s := &krakenScraper{
+		wsClient: mockWs,
+	}
+	pair := models.ExchangePair{
+		UnderlyingPair: models.Pair{
+			QuoteToken: models.Asset{Symbol: "BTC"},
+			BaseToken:  models.Asset{Symbol: "USD"},
+		},
+	}
+	// Test subscribe
+	err := s.subscribe(pair, true, lock)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(mockWs.writeJSONCalls) != 1 {
+		t.Errorf("expected WriteJSON to be called once")
+	}
+	// Test unsubscribe
+	err = s.subscribe(pair, false, lock)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(mockWs.writeJSONCalls) != 2 {
+		t.Errorf("expected WriteJSON to be called twice")
+	}
+}
+
+func TestKrakenResubscribe(t *testing.T) {
+	ch := make(chan models.ExchangePair, 1)
+	ch <- models.ExchangePair{
+		ForeignName: "BTC-USD",
+		UnderlyingPair: models.Pair{
+			QuoteToken: models.Asset{Symbol: "BTC"},
+			BaseToken:  models.Asset{Symbol: "USD"},
+		},
+	}
+	lock := &sync.RWMutex{}
+	mockWs := &mockWsConn{}
+	s := &krakenScraper{
+		wsClient:         mockWs,
+		subscribeChannel: ch,
+	}
+	// You can simulate error on mockWs.WriteJSON if needed
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.resubscribe(ctx, lock)
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+}
+
+func TestKrakenClose(t *testing.T) {
+	mockWs := &mockWsConn{}
+	cancel := func() {}
+	s := &krakenScraper{wsClient: mockWs}
+	err := s.Close(cancel)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !mockWs.closeCalled {
+		t.Errorf("expected Close to be called")
+	}
+}
+
 func TestKrakenFetchTrades(t *testing.T) {
 	mockWs := &mockWsConn{}
 	tradesCh := make(chan models.Trade, 1)
@@ -144,3 +218,114 @@ func TestKrakenFetchTrades(t *testing.T) {
 		t.Fatal("did not receive trade")
 	}
 }
+
+func TestKrakenFetchTrades_ReadJSONError(t *testing.T) {
+	mockWs := &mockWsConn{
+		readJSONErrs: []error{
+			errors.New("test error"),
+		},
+	}
+	scraper := &krakenScraper{
+		wsClient:         mockWs,
+		tradesChannel:    make(chan models.Trade, 1),
+		tickerPairMap:    map[string]models.Pair{},
+		lastTradeTimeMap: map[string]time.Time{},
+		maxErrCount:      1,
+		restartWaitTime:  0,
+	}
+	var lock sync.RWMutex
+	go scraper.fetchTrades(&lock)
+	time.Sleep(10 * time.Millisecond)
+}
+
+func TestKrakenFetchTrades_NonTradeChannel(t *testing.T) {
+	mockWs := &mockWsConn{
+		readJSONQueue: []interface{}{
+			krakenWSResponse{
+				Channel: "book", // Not "trade"
+				Data:    []krakenWSResponseData{},
+			},
+		},
+		readJSONErrs: []error{nil},
+	}
+	scraper := &krakenScraper{
+		wsClient:         mockWs,
+		tradesChannel:    make(chan models.Trade, 1),
+		tickerPairMap:    map[string]models.Pair{},
+		lastTradeTimeMap: map[string]time.Time{},
+	}
+	var lock sync.RWMutex
+	go scraper.fetchTrades(&lock)
+	time.Sleep(10 * time.Millisecond)
+	// No trade should be sent
+	select {
+	case <-scraper.tradesChannel:
+		t.Fatal("should not receive trade for non-trade channel")
+	default:
+		// pass
+	}
+}
+
+func TestKrakenFetchTrades_EmptyData(t *testing.T) {
+	mockWs := &mockWsConn{
+		readJSONQueue: []interface{}{
+			krakenWSResponse{
+				Channel: "trade",
+				Data:    []krakenWSResponseData{},
+			},
+		},
+		readJSONErrs: []error{nil},
+	}
+	scraper := &krakenScraper{
+		wsClient:         mockWs,
+		tradesChannel:    make(chan models.Trade, 1),
+		tickerPairMap:    map[string]models.Pair{},
+		lastTradeTimeMap: map[string]time.Time{},
+	}
+	var lock sync.RWMutex
+	go scraper.fetchTrades(&lock)
+	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-scraper.tradesChannel:
+		t.Fatal("should not receive trade for empty data")
+	default:
+		// pass
+	}
+}
+
+// func TestKrakenFetchTrades_ParseTradeError(t *testing.T) {
+// 	mockWs := &mockWsConn{
+// 		readJSONQueue: []interface{}{
+// 			krakenWSResponse{
+// 				Channel: "trade",
+// 				Data: []krakenWSResponseData{
+// 					{
+// 						Symbol:    "BTC/USD",
+// 						Side:      "buy",
+// 						Price:     -1,
+// 						Size:      -1,
+// 						OrderType: "market",
+// 						TradeID:   42,
+// 						Time:      "not-a-time",
+// 					},
+// 				},
+// 			},
+// 		},
+// 		readJSONErrs: []error{nil},
+// 	}
+// 	scraper := &krakenScraper{
+// 		wsClient:         mockWs,
+// 		tradesChannel:    make(chan models.Trade, 1),
+// 		tickerPairMap:    map[string]models.Pair{"BTCUSD": {QuoteToken: models.Asset{Symbol: "BTC"}, BaseToken: models.Asset{Symbol: "USD"}}},
+// 		lastTradeTimeMap: map[string]time.Time{},
+// 	}
+// 	var lock sync.RWMutex
+// 	go scraper.fetchTrades(&lock)
+// 	time.Sleep(10 * time.Millisecond)
+// 	select {
+// 	case <-scraper.tradesChannel:
+// 		t.Fatal("should not receive trade for bad timestamp")
+// 	default:
+// 		// pass
+// 	}
+// }

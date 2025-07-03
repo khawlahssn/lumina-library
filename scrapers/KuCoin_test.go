@@ -1,6 +1,11 @@
 package scrapers
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"sync"
 	"testing"
@@ -104,6 +109,236 @@ func TestParseKuCoinTradeMessage(t *testing.T) {
 	}
 }
 
+func TestKuCoinTradesChannel(t *testing.T) {
+	s := &kucoinScraper{tradesChannel: make(chan models.Trade)}
+	if s.TradesChannel() == nil {
+		t.Error("expected non-nil tradesChannel")
+	}
+}
+
+func TestKuCoinClose(t *testing.T) {
+	mockWs := &mockWsConn{}
+	s := &kucoinScraper{wsClient: mockWs}
+	called := false
+	cancel := func() { called = true }
+	err := s.Close(cancel)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !mockWs.closeCalled {
+		t.Errorf("expected Close to be called on wsClient")
+	}
+	if !called {
+		t.Errorf("expected cancel func to be called")
+	}
+}
+
+func TestKuCoinSubscribe(t *testing.T) {
+	lock := &sync.RWMutex{}
+	mockWs := &mockWsConn{}
+	s := &kucoinScraper{wsClient: mockWs}
+	pair := models.ExchangePair{ForeignName: "ETH-USDT"}
+	err := s.subscribe(pair, true, lock)
+	if err != nil {
+		t.Errorf("unexpected error on subscribe: %v", err)
+	}
+	err = s.subscribe(pair, false, lock)
+	if err != nil {
+		t.Errorf("unexpected error on unsubscribe: %v", err)
+	}
+	if len(mockWs.writeJSONCalls) != 2 {
+		t.Errorf("expected 2 WriteJSON calls, got %d", len(mockWs.writeJSONCalls))
+	}
+}
+
+func TestKuCoinResubscribe(t *testing.T) {
+	ch := make(chan models.ExchangePair, 1)
+	ch <- models.ExchangePair{ForeignName: "ETH-USDT"}
+	lock := &sync.RWMutex{}
+	mockWs := &mockWsConn{}
+	s := &kucoinScraper{
+		wsClient:         mockWs,
+		subscribeChannel: ch,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.resubscribe(ctx, lock)
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+}
+
+func TestKuCoinPing(t *testing.T) {
+	mockWs := &mockWsConn{}
+	s := &kucoinScraper{wsClient: mockWs}
+	lock := &sync.RWMutex{}
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.ping(ctx, 1, time.Now(), lock)
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+}
+
+func TestGetPublicKuCoinToken(t *testing.T) {
+	// Serve a fake KuCoin response
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"code": "200000",
+			"data": map[string]interface{}{
+				"token": "dummy-token",
+				"instanceServers": []map[string]interface{}{
+					{"pingInterval": int64(10)},
+				},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+	token, ping, err := getPublicKuCoinToken(server.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if token != "dummy-token" {
+		t.Errorf("unexpected token: %v", token)
+	}
+	if ping != 10 {
+		t.Errorf("unexpected pingInterval: %v", ping)
+	}
+}
+
+func TestKucoinHandleWSResponse(t *testing.T) {
+	pair := models.Pair{
+		QuoteToken: models.Asset{Symbol: "ETH"},
+		BaseToken:  models.Asset{Symbol: "USDT"},
+	}
+	s := &kucoinScraper{
+		tradesChannel:    make(chan models.Trade, 1),
+		tickerPairMap:    map[string]models.Pair{"ETHUSDT": pair},
+		lastTradeTimeMap: make(map[string]time.Time),
+	}
+	var lock sync.RWMutex
+
+	msg := kuCoinWSResponse{
+		Data: kuCoinWSData{
+			Symbol:  "ETH-USDT",
+			Side:    "buy",
+			Price:   "4200.99",
+			Size:    "0.12",
+			TradeID: "123abc",
+			Time:    "1721923200000",
+		},
+	}
+
+	s.handleWSResponse(msg, &lock)
+
+	select {
+	case trade := <-s.tradesChannel:
+		if trade.Price != 4200.99 {
+			t.Errorf("expected price 4200.99, got %v", trade.Price)
+		}
+		if trade.Volume != 0.12 {
+			t.Errorf("expected volume 0.12, got %v", trade.Volume)
+		}
+		if trade.ForeignTradeID != "123abc" {
+			t.Errorf("expected ForeignTradeID '123abc', got %v", trade.ForeignTradeID)
+		}
+		if trade.QuoteToken.Symbol != "ETH" || trade.BaseToken.Symbol != "USDT" {
+			t.Errorf("unexpected tokens: %v, %v", trade.QuoteToken, trade.BaseToken)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected trade, got none")
+	}
+}
+
+func TestKucoinHandleWSResponse_ParseError(t *testing.T) {
+	pair := models.Pair{
+		QuoteToken: models.Asset{Symbol: "ETH"},
+		BaseToken:  models.Asset{Symbol: "USDT"},
+	}
+	s := &kucoinScraper{
+		tradesChannel:    make(chan models.Trade, 1),
+		tickerPairMap:    map[string]models.Pair{"ETHUSDT": pair},
+		lastTradeTimeMap: make(map[string]time.Time),
+	}
+	var lock sync.RWMutex
+
+	msg := kuCoinWSResponse{
+		Data: kuCoinWSData{
+			Symbol:  "ETH-USDT",
+			Side:    "buy",
+			Price:   "badprice",
+			Size:    "0.12",
+			TradeID: "123abc",
+			Time:    "1721923200000",
+		},
+	}
+
+	s.handleWSResponse(msg, &lock)
+
+	select {
+	case trade := <-s.tradesChannel:
+		if trade.Price != 0 || trade.Volume != 0 || trade.Time != (time.Time{}) {
+			t.Errorf("expected zero trade values, got: %+v", trade)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected trade, got none")
+	}
+}
+
+func TestKucoinHandleWSResponse_UnmappedPair(t *testing.T) {
+	scraper := &kucoinScraper{
+		tradesChannel:    make(chan models.Trade, 1),
+		tickerPairMap:    map[string]models.Pair{}, // empty, to force missing mapping
+		lastTradeTimeMap: map[string]time.Time{},
+	}
+	var lock sync.RWMutex
+	msg := kuCoinWSResponse{
+		Type: "message",
+		Data: kuCoinWSData{
+			Symbol:  "FOO-BAR",
+			Side:    "buy",
+			Price:   "100.0",
+			Size:    "1.0",
+			TradeID: "999",
+			Time:    strconv.FormatInt(time.Now().UnixNano()/1e6, 10),
+		},
+	}
+	go scraper.handleWSResponse(msg, &lock)
+	select {
+	case trade := <-scraper.tradesChannel:
+		// Trade tokens should be zero-valued
+		if trade.QuoteToken.Symbol != "" || trade.BaseToken.Symbol != "" {
+			t.Errorf("expected zero-value tokens for missing mapping, got %+v", trade)
+		}
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("did not receive trade")
+	}
+}
+
+// func TestKucoinHandleWSResponse_InvalidPair(t *testing.T) {
+// 	s := &kucoinScraper{
+// 		tradesChannel: make(chan models.Trade, 1),
+// 		tickerPairMap: map[string]models.Pair{},
+// 	}
+// 	var lock sync.RWMutex
+
+// 	msg := kuCoinWSResponse{
+// 		Data: kuCoinWSData{
+// 			Symbol:  "BTCUSDT", // No dash
+// 			Price:   "100.1",
+// 			Size:    "1",
+// 			Side:    "buy",
+// 			TradeID: "foo",
+// 			Time:    "1721923200000",
+// 		},
+// 	}
+
+// 	s.handleWSResponse(msg, &lock)
+
+// 	select {
+// 	case trade := <-s.tradesChannel:
+// 		t.Fatalf("expected no trade, got %+v", trade)
+// 	default:
+// 	}
+// }
+
 func TestKucoinFetchTrades(t *testing.T) {
 	mockWs := &mockWsConn{}
 	tradesCh := make(chan models.Trade, 1)
@@ -161,4 +396,20 @@ func TestKucoinFetchTrades(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("did not receive trade")
 	}
+}
+
+func TestKucoinFetchTrades_HandleError(t *testing.T) {
+	mockWs := &mockWsConn{
+		readJSONQueue: []interface{}{},
+		readJSONErrs:  []error{errors.New("test error"), errors.New("test error"), errors.New("test error")},
+	}
+	scraper := &kucoinScraper{
+		wsClient:      mockWs,
+		tradesChannel: make(chan models.Trade, 1),
+	}
+	var lock sync.RWMutex
+
+	go scraper.fetchTrades(&lock)
+
+	time.Sleep(50 * time.Millisecond)
 }

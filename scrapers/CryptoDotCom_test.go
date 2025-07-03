@@ -1,6 +1,8 @@
 package scrapers
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -201,6 +203,193 @@ func TestCryptodotcomFetchTrades(t *testing.T) {
 		}
 		if trade.QuoteToken.Symbol != "BTC" || trade.BaseToken.Symbol != "USDT" {
 			t.Errorf("unexpected tokens: %v, %v", trade.QuoteToken, trade.BaseToken)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for trade")
+	}
+}
+
+func TestCryptoDotComNewAndCloseAndChannel(t *testing.T) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := make(chan string, 1)
+	NewCryptodotcomScraper(ctx, nil, ch, &wg)
+	// TradesChannel/Close (with nil wsClient)
+	s := &cryptodotcomScraper{}
+	s.TradesChannel()
+	s.Close(func() {})
+}
+
+func TestCryptoDotComSubscribe_SendHeartbeat(t *testing.T) {
+	lock := &sync.RWMutex{}
+	mockWs := &mockWsConn{}
+	s := &cryptodotcomScraper{wsClient: mockWs}
+
+	pair := models.ExchangePair{ForeignName: "BTC-USDT"}
+	err := s.subscribe(pair, true, lock)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	err = s.sendHeartbeat(42, lock)
+	if err != nil {
+		t.Errorf("unexpected error from sendHeartbeat: %v", err)
+	}
+}
+
+func TestCryptoDotComResubscribe(t *testing.T) {
+	ch := make(chan models.ExchangePair, 1)
+	ch <- models.ExchangePair{ForeignName: "BTC-USDT"}
+	lock := &sync.RWMutex{}
+	mockWs := &mockWsConn{}
+	s := &cryptodotcomScraper{
+		wsClient:         mockWs,
+		subscribeChannel: ch,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Cover normal path (subscribe/unsubscribe)
+	go s.resubscribe(ctx, lock)
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	// Let ctx.Done() branch be taken
+	time.Sleep(10 * time.Millisecond)
+
+	// Cover error path (simulate WriteJSON error)
+	ch2 := make(chan models.ExchangePair, 1)
+	ch2 <- models.ExchangePair{ForeignName: "BTC-USDT"}
+	mockWs2 := &mockWsConn{
+		writeJSONErrs: []error{
+			errors.New("write error"),
+			nil,
+		},
+	}
+	s2 := &cryptodotcomScraper{
+		wsClient:         mockWs2,
+		subscribeChannel: ch2,
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	go s2.resubscribe(ctx2, lock)
+	time.Sleep(10 * time.Millisecond)
+	cancel2()
+}
+
+func TestCryptoDotComHandleWSResponse_ErrorPath(t *testing.T) {
+	s := &cryptodotcomScraper{
+		tradesChannel:       make(chan models.Trade, 2),
+		tickerPairMap:       map[string]models.Pair{"BTCUSDT": {}},
+		lastTradeTimeMap:    make(map[string]time.Time),
+		tradeTimeoutSeconds: 1,
+	}
+	lock := &sync.RWMutex{}
+
+	// Error 1: Bad Message
+	badMsg := cryptodotcomWSResponse{
+		Result: cryptodotcomWSResponseResult{
+			Data: []cryptodotcomWSResponseData{
+				{
+					TradeID:     "bad",
+					Timestamp:   time.Now().UnixMilli(),
+					Price:       "notafloat",
+					Volume:      "0.2",
+					ForeignName: "BTC_USDT",
+				},
+			},
+		},
+	}
+	s.handleWSResponse(badMsg, lock)
+	select {
+	case tr := <-s.tradesChannel:
+		t.Errorf("did not expect trade for parse error, got %v", tr)
+	default:
+		// success
+	}
+
+	// Error 2: Old Trade
+	msg := cryptodotcomWSResponse{
+		Result: cryptodotcomWSResponseResult{
+			Data: []cryptodotcomWSResponseData{
+				{
+					TradeID:     "old",
+					Timestamp:   time.Now().Add(-2*time.Second).UnixNano() / 1e6, // too old
+					Price:       "10",
+					Volume:      "1",
+					ForeignName: "BTC_USDT",
+				},
+			},
+		},
+	}
+	s.handleWSResponse(msg, lock)
+	select {
+	case tr := <-s.tradesChannel:
+		t.Errorf("did not expect trade for too old, got %v", tr)
+	default:
+		// success
+	}
+}
+
+func TestCryptoDotComFetchTrades(t *testing.T) {
+	mockWs := &mockWsConn{
+		readJSONQueue: []interface{}{
+			cryptodotcomWSResponse{ // heartbeat
+				ID:     9,
+				Method: "public/heartbeat",
+			},
+			cryptodotcomWSResponse{ // valid trade
+				Method: "not_heartbeat",
+				Result: cryptodotcomWSResponseResult{
+					Data: []cryptodotcomWSResponseData{
+						{
+							TradeID:     "999",
+							Timestamp:   time.Now().UnixMilli(),
+							Price:       "50",
+							Volume:      "0.01",
+							Side:        "BUY",
+							ForeignName: "BTC_USDT",
+						},
+					},
+				},
+			},
+			cryptodotcomWSResponse{ // invalid trade (parse error)
+				Method: "not_heartbeat",
+				Result: cryptodotcomWSResponseResult{
+					Data: []cryptodotcomWSResponseData{
+						{
+							TradeID:     "bad",
+							Timestamp:   time.Now().UnixMilli(),
+							Price:       "nope",
+							Volume:      "nope",
+							Side:        "BUY",
+							ForeignName: "BTC_USDT",
+						},
+					},
+				},
+			},
+		},
+		readJSONErrs: []error{
+			nil, nil, nil,
+		},
+	}
+	tradesCh := make(chan models.Trade, 1)
+	lock := &sync.RWMutex{}
+	scraper := &cryptodotcomScraper{
+		wsClient:            mockWs,
+		tradesChannel:       tradesCh,
+		subscribeChannel:    make(chan models.ExchangePair),
+		tickerPairMap:       map[string]models.Pair{"BTCUSDT": {}},
+		lastTradeTimeMap:    make(map[string]time.Time),
+		tradeTimeoutSeconds: 9999,
+	}
+	go scraper.fetchTrades(lock)
+
+	// Heartbeat should trigger sendHeartbeat (not produce trade)
+	time.Sleep(10 * time.Millisecond) // let goroutine run
+	// Should get the valid trade
+	select {
+	case trade := <-tradesCh:
+		if trade.Price != 50 {
+			t.Errorf("unexpected trade: %v", trade)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for trade")

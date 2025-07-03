@@ -1,6 +1,8 @@
 package scrapers
 
 import (
+	"context"
+	"errors"
 	"strconv"
 	"sync"
 	"testing"
@@ -18,7 +20,7 @@ func TestBinanceParseWSResponse(t *testing.T) {
 		{
 			name: "valid buy trade",
 			input: binanceWSResponse{
-				Timestamp:      1721923200000, // example ms value
+				Timestamp:      1721923200000,
 				Price:          "40000.5",
 				Volume:         "0.1",
 				ForeignTradeID: 1234,
@@ -143,23 +145,77 @@ func TestSubscribe(t *testing.T) {
 	}
 }
 
+func TestResubscribe(t *testing.T) {
+	ch := make(chan models.ExchangePair, 1)
+	ch <- models.ExchangePair{ForeignName: "BTC-USDT"}
+	lock := &sync.RWMutex{}
+	mockWs := &mockWsConn{}
+	s := &binanceScraper{
+		wsClient:         mockWs,
+		subscribeChannel: ch,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go s.resubscribe(ctx, lock)
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+}
+
+func TestTradesChannel(t *testing.T) {
+	s := &binanceScraper{tradesChannel: make(chan models.Trade)}
+	if s.TradesChannel() == nil {
+		t.Fatal("expected non-nil channel")
+	}
+}
+
+func TestClose(t *testing.T) {
+	mockWs := &mockWsConn{}
+	cancel := func() {}
+	s := &binanceScraper{wsClient: mockWs}
+	err := s.Close(cancel)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if !mockWs.closeCalled {
+		t.Errorf("expected Close to be called")
+	}
+}
+
+func TestCloseNilWsClient(t *testing.T) {
+	cancel := func() {}
+	s := &binanceScraper{wsClient: nil}
+	err := s.Close(cancel)
+	if err != nil {
+		t.Errorf("expected nil error when wsClient is nil, got %v", err)
+	}
+}
+
 func TestFetchTrades(t *testing.T) {
-	// Prepare the mock websocket with a valid trade message
 	mockWs := &mockWsConn{
 		readJSONQueue: []interface{}{
 			binanceWSResponse{
-				Timestamp:      1620000000000, // ms timestamp
+				Timestamp:      1620000000000,
 				Price:          "123.45",
 				Volume:         "6.78",
 				ForeignTradeID: 99,
 				ForeignName:    "BTCUSDT",
-				Type:           "trade", // just needs to be non-nil
+				Type:           "trade",
+				Buy:            true,
+			},
+			binanceWSResponse{
+				Timestamp:      1620000001000,
+				Price:          "0.01",
+				Volume:         "0.1",
+				ForeignTradeID: 100,
+				ForeignName:    "BTCUSDT",
+				Type:           nil,
 				Buy:            true,
 			},
 		},
+		readJSONErrs: []error{
+			nil,
+			nil,
+		},
 	}
-
-	// Add a dummy mapping for tickerPairMap
 	pair := models.Pair{}
 	tickerMap := map[string]models.Pair{
 		"BTCUSDT": pair,
@@ -175,9 +231,9 @@ func TestFetchTrades(t *testing.T) {
 	var lock sync.RWMutex
 	go scraper.fetchTrades(&lock)
 
+	// Assert we get a trade
 	select {
 	case trade := <-scraper.tradesChannel:
-		// Assert the main trade fields
 		if trade.Price != 123.45 {
 			t.Errorf("expected price 123.45, got %v", trade.Price)
 		}
@@ -190,4 +246,56 @@ func TestFetchTrades(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("expected trade, got none")
 	}
+
+	err := scraper.Close(func() {})
+	if err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
+	if !mockWs.closeCalled {
+		t.Error("expected mockWs.Close() to be called")
+	}
+}
+
+func TestFetchTrades_ReadJSONError(t *testing.T) {
+	mockWs := &mockWsConn{
+		readJSONErrs: []error{errors.New("test error")},
+	}
+	scraper := &binanceScraper{
+		wsClient:         mockWs,
+		tradesChannel:    make(chan models.Trade, 1),
+		tickerPairMap:    map[string]models.Pair{},
+		lastTradeTimeMap: make(map[string]time.Time),
+	}
+	var lock sync.RWMutex
+	go scraper.fetchTrades(&lock)
+	select {
+	case trade := <-scraper.tradesChannel:
+		t.Fatalf("did NOT expect a trade, got %+v", trade)
+	case <-time.After(100 * time.Millisecond):
+		// No trade, PASS!
+	}
+}
+
+func TestFetchTrades_TooManyErrors(t *testing.T) {
+	// Prepare enough errors to exceed maxErrCount
+	mockWs := &mockWsConn{
+		readJSONErrs: []error{
+			errors.New("err1"),
+			errors.New("err2"),
+			errors.New("err3"),
+			errors.New("err4"),
+		},
+	}
+	scraper := &binanceScraper{
+		wsClient:         mockWs,
+		tradesChannel:    make(chan models.Trade, 1),
+		tickerPairMap:    map[string]models.Pair{},
+		lastTradeTimeMap: make(map[string]time.Time),
+		maxErrCount:      3, // small for the test
+	}
+	var lock sync.RWMutex
+	go scraper.fetchTrades(&lock)
+	// Wait to ensure the goroutine exits after errors
+	time.Sleep(100 * time.Millisecond)
+	// There is no output expected
 }
