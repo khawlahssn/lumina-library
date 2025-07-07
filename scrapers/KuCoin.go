@@ -237,7 +237,7 @@ func parseKuCoinTradeMessage(message kuCoinWSResponse) (price float64, volume fl
 		return
 	}
 	if message.Data.Side == "sell" {
-		volume -= 1
+		volume *= -1
 	}
 	timeMilliseconds, err := strconv.Atoi(message.Data.Time)
 	if err != nil {
