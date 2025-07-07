@@ -141,6 +141,7 @@ func (scraper *krakenScraper) fetchTrades(lock *sync.RWMutex) {
 				price, volume, timestamp, foreignTradeID, err := parseKrakenTradeMessage(data)
 				if err != nil {
 					log.Errorf("Kraken - parseTradeMessage: %v.", err)
+					continue
 				}
 
 				// Identify ticker symbols with underlying assets.
