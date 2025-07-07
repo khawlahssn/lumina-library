@@ -42,6 +42,31 @@ func TestCryptodotcomParseTradeMessage(t *testing.T) {
 			},
 		},
 		{
+			name: "single valid sell trade",
+			input: cryptodotcomWSResponse{
+				Result: cryptodotcomWSResponseResult{
+					Data: []cryptodotcomWSResponseData{
+						{
+							TradeID:   "abc123",
+							Timestamp: 1721923200000,
+							Price:     "12345.67",
+							Volume:    "0.01",
+							Side:      "SELL",
+						},
+					},
+				},
+			},
+			expect: []models.Trade{
+				{
+					Price:          12345.67,
+					Volume:         -0.01,
+					Time:           time.Unix(0, 1721923200000*1e6),
+					Exchange:       Exchanges[CRYPTODOTCOM_EXCHANGE],
+					ForeignTradeID: "abc123",
+				},
+			},
+		},
+		{
 			name: "invalid price (should return no trades)",
 			input: cryptodotcomWSResponse{
 				Result: cryptodotcomWSResponseResult{

@@ -37,6 +37,25 @@ func TestBinanceParseWSResponse(t *testing.T) {
 			},
 		},
 		{
+			name: "valid sell trade",
+			input: binanceWSResponse{
+				Timestamp:      1721923200000,
+				Price:          "40000.5",
+				Volume:         "0.1",
+				ForeignTradeID: 1234,
+				ForeignName:    "BTCUSDT",
+				Type:           "trade",
+				Buy:            false,
+			},
+			expect: models.Trade{
+				Exchange:       Exchanges[BINANCE_EXCHANGE],
+				Time:           time.Unix(0, 1721923200000*1e6),
+				Price:          40000.5,
+				Volume:         -0.1,
+				ForeignTradeID: strconv.Itoa(1234),
+			},
+		},
+		{
 			name: "invalid price (should be 0)",
 			input: binanceWSResponse{
 				Timestamp:      1000000000000,

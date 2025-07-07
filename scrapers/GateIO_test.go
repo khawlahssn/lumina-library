@@ -60,6 +60,37 @@ func TestHandleWSResponse_GateIO(t *testing.T) {
 			},
 		},
 		{
+			name: "valid sell trade",
+			input: GateIOResponseTrade{
+				Result: struct {
+					ID           int    `json:"id"`
+					CreateTime   int    `json:"create_time"`
+					CreateTimeMs string `json:"create_time_ms"`
+					Side         string `json:"side"`
+					CurrencyPair string `json:"currency_pair"`
+					Amount       string `json:"amount"`
+					Price        string `json:"price"`
+				}{
+					ID:           123456,
+					CreateTime:   1721923200,
+					CreateTimeMs: "1721923200000",
+					Side:         "sell",
+					CurrencyPair: "BTC_USDT",
+					Amount:       "0.123",
+					Price:        "42000.99",
+				},
+			},
+			expect: models.Trade{
+				QuoteToken:     dummyPair.QuoteToken,
+				BaseToken:      dummyPair.BaseToken,
+				Price:          42000.99,
+				Volume:         -0.123,
+				Time:           time.Unix(1721923200, 0),
+				Exchange:       Exchanges[GATEIO_EXCHANGE],
+				ForeignTradeID: strconv.FormatInt(123456, 16),
+			},
+		},
+		{
 			name: "invalid price (should return zero trade)",
 			input: GateIOResponseTrade{
 				Result: struct {

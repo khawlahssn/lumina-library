@@ -43,6 +43,23 @@ func TestCoinbaseParseTradeMessage(t *testing.T) {
 			},
 		},
 		{
+			name: "valid sell trade",
+			input: coinBaseWSResponse{
+				Price:   "30000.00",
+				Size:    "0.5",
+				Time:    "2024-06-26T01:23:45.123456Z",
+				TradeID: 789,
+				Side:    "sell",
+			},
+			expect: models.Trade{
+				Price:          30000.00,
+				Volume:         -0.5,
+				Time:           mustParseTime(t, "2006-01-02T15:04:05.000000Z", "2024-06-26T01:23:45.123456Z"),
+				Exchange:       Exchanges[COINBASE_EXCHANGE],
+				ForeignTradeID: strconv.Itoa(789),
+			},
+		},
+		{
 			name: "invalid price (should return zero trade)",
 			input: coinBaseWSResponse{
 				Price:   "not-a-number",

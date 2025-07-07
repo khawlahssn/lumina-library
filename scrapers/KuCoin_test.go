@@ -42,6 +42,23 @@ func TestParseKuCoinTradeMessage(t *testing.T) {
 			expectErr:   false,
 		},
 		{
+			name: "valid sell trade",
+			input: kuCoinWSResponse{
+				Data: kuCoinWSData{
+					Price:   "33225.1",
+					Size:    "0.23",
+					Side:    "sell",
+					TradeID: "abc123",
+					Time:    "1721923200000", // ms since epoch
+				},
+			},
+			wantPrice:   33225.1,
+			wantVolume:  -0.23,
+			wantTime:    time.Unix(0, 1721923200000),
+			wantTradeID: "abc123",
+			expectErr:   false,
+		},
+		{
 			name: "invalid price",
 			input: kuCoinWSResponse{
 				Data: kuCoinWSData{

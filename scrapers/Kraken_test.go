@@ -39,6 +39,23 @@ func TestParseKrakenTradeMessage(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "valid sell trade",
+			input: krakenWSResponseData{
+				Symbol:    "BTC/USD",
+				Side:      "sell",
+				Price:     31500.5,
+				Size:      0.123,
+				OrderType: "market",
+				TradeID:   456,
+				Time:      "2024-06-26T23:50:55.000000Z",
+			},
+			want:    31500.5,
+			wantVol: -0.123,
+			wantTs:  "2024-06-26T23:50:55.000000Z",
+			wantID:  strconv.Itoa(456),
+			wantErr: false,
+		},
+		{
 			name: "invalid timestamp",
 			input: krakenWSResponseData{
 				Symbol:    "ETH/USD",
