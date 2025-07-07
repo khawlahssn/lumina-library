@@ -145,13 +145,14 @@ func (scraper *kucoinScraper) handleWSResponse(message kuCoinWSResponse, lock *s
 	price, volume, timestamp, foreignTradeID, err := parseKuCoinTradeMessage(message)
 	if err != nil {
 		log.Errorf("KuCoin - parseTradeMessage: %v.", err)
+		return
 	}
 
 	// Identify ticker symbols with underlying assets.
 	pair := strings.Split(message.Data.Symbol, "-")
 	if len(pair) < 2 {
 		log.Warnf("KuCoin - Unexpected symbol format: %q", message.Data.Symbol)
-		return // or continue, if this is in a loop
+		return
 	}
 
 	var exchangepair models.Pair
