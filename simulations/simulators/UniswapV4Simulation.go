@@ -8,9 +8,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"golang.org/x/crypto/sha3"
 
 	v4quoter "github.com/diadata-org/lumina-library/contracts/uniswapv4/V4Quoter"
 	poolManager "github.com/diadata-org/lumina-library/contracts/uniswapv4/poolManager"
@@ -32,8 +34,12 @@ var (
 	restLuminaUrl = ""
 	// Amount in USD that is used to simulate trades.
 	amountInUSDConstant = float64(100)
-	// fees are ints with precision 6.
-	// allFeesV4 = []*big.Int{big.NewInt(100), big.NewInt(500), big.NewInt(3000), big.NewInt(10000)}
+	feeToTickSpacing    = map[string]*big.Int{
+		"10":    big.NewInt(1),
+		"500":   big.NewInt(10),
+		"3000":  big.NewInt(60),
+		"10000": big.NewInt(200),
+	}
 
 	// TO DO: Put the following variables to environment variables.
 	DIA_Meta_Contract_Address_V4   = "0x0087342f5f4c7AB23a37c045c3EF710749527c88"
@@ -93,7 +99,7 @@ func NewUniswapV4Simulator(exchangepairs []models.ExchangePair, tradesChannel ch
 	}
 	defer s.luminaClient.Close()
 
-	quoterAddr := common.HexToAddress(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_QUOTER", "0x000000000004444c5dc75cB358380D2e3dE08A90"))
+	quoterAddr := common.HexToAddress(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_QUOTER", "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203"))
 	s.quoter, err = v4quoter.NewV4Quoter(quoterAddr, s.restClient)
 	if err != nil {
 		log.Fatal("Failed to instantiate V4Quoter: ", err)
@@ -190,77 +196,107 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 	var wg sync.WaitGroup
 
 	for _, ep := range s.exchangepairs {
-		wg.Add(1)
-		go func(ep models.ExchangePair) {
-			defer wg.Done()
+		for feeStr, tickSpacing := range feeToTickSpacing {
+			wg.Add(1)
+			go func(ep models.ExchangePair) {
+				defer wg.Done()
 
-			basePrice := s.priceMap[ep.UnderlyingPair.BaseToken].Price
-			amountInBase := amountInUSDConstant / basePrice
+				basePrice := s.priceMap[ep.UnderlyingPair.BaseToken].Price
+				amountInBase := amountInUSDConstant / basePrice
 
-			decimals := ep.UnderlyingPair.BaseToken.Decimals
-			amountIn := FloatToBigInt(amountInBase, decimals)
-			// amountIn := big.NewInt(int64(amountInBase))
-			log.Infof("[UniswapV4 Simulate] amountIn & amountInBase: %s | %v", amountIn.String(), amountInBase)
+				decimals := ep.UnderlyingPair.BaseToken.Decimals
+				amountIn := FloatToBigInt(amountInBase, decimals)
+				log.Infof("amountIn & amountInBase: %s | %v", amountIn.String(), amountInBase)
 
-			poolKey := v4quoter.PoolKey{
-				Currency0:   common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address), // WBTC
-				Currency1:   common.HexToAddress(ep.UnderlyingPair.BaseToken.Address),  // USDT
-				Fee:         big.NewInt(3000),                                          // 0.3%
-				TickSpacing: big.NewInt(60),                                            // default for 0.3% tier
-				Hooks:       common.HexToAddress("0x0000000000000000000000000000000000000000"),
-			}
+				fee := new(big.Int)
+				fee.SetString(feeStr, 10)
+				poolKey := v4quoter.PoolKey{
+					Currency0:   common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address), // USDC
+					Currency1:   common.HexToAddress(ep.UnderlyingPair.BaseToken.Address),  // USDT
+					Fee:         fee,                                                       // 0.001% | 0.05% | 0.3% | 1%
+					TickSpacing: tickSpacing,                                               // 1 | 10 | 60 | 200
+					Hooks:       common.HexToAddress("0x0000000000000000000000000000000000000000"),
+				}
 
-			params := v4quoter.IV4QuoterQuoteExactSingleParams{
-				PoolKey:     poolKey,
-				ZeroForOne:  true,     // or false，depends on the direction
-				ExactAmount: amountIn, // *big.Int
-				HookData:    []byte{},
-			}
+				poolId, err := ComputePoolId(poolKey)
+				if err != nil {
+					log.Warnf("ComputePoolId failed: %v", err)
+					return
+				} else {
+					log.Infof("PoolId: %s", poolId.Hex())
+				}
 
-			log.Infof(
-				"[UniswapV4 Simulate] PoolKey: {Token0: %s, Token1: %s, Fee: %d, TickSpacing: %s, Hooks: %s} | ZeroForOne: %v | ExactAmount: %s | HookData: %x",
-				params.PoolKey.Currency0.Hex(),
-				params.PoolKey.Currency1.Hex(),
-				params.PoolKey.Fee,
-				params.PoolKey.TickSpacing.String(),
-				params.PoolKey.Hooks.Hex(),
-				params.ZeroForOne,
-				params.ExactAmount.String(),
-				params.HookData,
-			)
+				params := v4quoter.IV4QuoterQuoteExactSingleParams{
+					PoolKey:     poolKey,
+					ZeroForOne:  true,     // or false，depends on the direction
+					ExactAmount: amountIn, // *big.Int
+					HookData:    []byte{},
+				}
 
-			amountOut, err := s.quoter.QuoteExactInputSingle(&bind.CallOpts{Context: context.Background()}, params)
-			if err != nil {
-				log.Warnf("QuoteExactInputSingle failed: %v", err)
-				return
-			}
+				log.Infof(
+					"[UniswapV4 Simulate] PoolKey: {Token0: %s, Token1: %s, Fee: %d, TickSpacing: %s, Hooks: %s} | ZeroForOne: %v | ExactAmount: %s | HookData: %x",
+					params.PoolKey.Currency0.Hex(),
+					params.PoolKey.Currency1.Hex(),
+					params.PoolKey.Fee,
+					params.PoolKey.TickSpacing.String(),
+					params.PoolKey.Hooks.Hex(),
+					params.ZeroForOne,
+					params.ExactAmount.String(),
+					params.HookData,
+				)
 
-			price := new(big.Float).Quo(new(big.Float).SetFloat64(amountInUSDConstant), new(big.Float).SetInt(amountOut.AmountOut))
-			priceF, _ := price.Float64()
-			amountOutF := WeiToFloat(amountOut.AmountOut, ep.UnderlyingPair.QuoteToken.Decimals)
+				amountOut, err := s.quoter.QuoteExactInputSingle(&bind.CallOpts{Context: context.Background()}, params)
+				if err != nil {
+					log.Warnf("QuoteExactInputSingle failed: %v", err)
+					return
+				}
 
-			trade := models.SimulatedTrade{
-				Price:       priceF,
-				Volume:      amountOutF,
-				QuoteToken:  ep.UnderlyingPair.QuoteToken,
-				BaseToken:   ep.UnderlyingPair.BaseToken,
-				PoolAddress: "0x000000000004444c5dc75cB358380D2e3dE08A90",
-				Time:        time.Now(),
-				Exchange:    Exchanges[UNISWAPV4_SIMULATION],
-			}
-			tradesChannel <- trade
-			log.Infof(
-				"[UniswapV4 Simulate] amountIn: %s | amountOut: %s | price: %.6f | volume: %.6f | base: %s | quote: %s",
-				amountIn.String(),
-				amountOut.AmountOut.String(),
-				trade.Price,
-				trade.Volume,
-				trade.BaseToken.Symbol,
-				trade.QuoteToken.Symbol,
-			)
-		}(ep)
+				liquidity, err := s.getPoolLiquidity(context.Background(), poolId, 6)
+				if err != nil {
+					log.Fatalf("Error getting liquidity: %v", err)
+				}
+				log.Infof("Total liquidity: %s", liquidity.String())
+
+				amountOutFloat := new(big.Float).SetInt(amountOut.AmountOut)
+				power := ep.UnderlyingPair.QuoteToken.Decimals
+				divisor := new(big.Float).SetInt(
+					new(big.Int).Exp(
+						big.NewInt(10),
+						big.NewInt(int64(power)),
+						nil,
+					),
+				)
+				amountOutFloat.Quo(amountOutFloat, divisor)
+
+				price := new(big.Float).Quo(new(big.Float).SetFloat64(amountInUSDConstant), amountOutFloat)
+				priceF, _ := price.Float64()
+				amountOutF := WeiToFloat(amountOut.AmountOut, ep.UnderlyingPair.QuoteToken.Decimals)
+
+				trade := models.SimulatedTrade{
+					Price:       priceF,
+					Volume:      amountOutF,
+					QuoteToken:  ep.UnderlyingPair.QuoteToken,
+					BaseToken:   ep.UnderlyingPair.BaseToken,
+					PoolAddress: "0x000000000004444c5dc75cB358380D2e3dE08A90",
+					Time:        time.Now(),
+					Exchange:    Exchanges[UNISWAPV4_SIMULATION],
+				}
+				tradesChannel <- trade
+				log.Infof(
+					"[base: %v/ quote: %v - fee: %v - tickSpacing: %v] amountIn: %s | amountOut: %s | price: %.6f | volume: %.6f",
+					ep.UnderlyingPair.BaseToken.Symbol,
+					ep.UnderlyingPair.QuoteToken.Symbol,
+					feeStr,
+					tickSpacing.String(),
+					amountIn.String(),
+					amountOut.AmountOut.String(),
+					trade.Price,
+					trade.Volume,
+				)
+			}(ep)
+		}
+		wg.Wait()
 	}
-	wg.Wait()
 }
 
 func WeiToFloat(amount *big.Int, decimals uint8) float64 {
@@ -268,4 +304,77 @@ func WeiToFloat(amount *big.Int, decimals uint8) float64 {
 	dec := new(big.Float).SetFloat64(float64Pow(10, int(decimals)))
 	val, _ := new(big.Float).Quo(amt, dec).Float64()
 	return val
+}
+
+func ComputePoolId(poolKey v4quoter.PoolKey) (common.Hash, error) {
+	uint24Type, err := abi.NewType("uint24", "", nil)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	int24Type, err := abi.NewType("int24", "", nil)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	addressType, err := abi.NewType("address", "", nil)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	arguments := abi.Arguments{
+		{Type: addressType}, // currency0
+		{Type: addressType}, // currency1
+		{Type: uint24Type},
+		{Type: int24Type},
+		{Type: addressType}, // hooks
+	}
+
+	// ABI encode
+	packed, err := arguments.Pack(
+		poolKey.Currency0,
+		poolKey.Currency1,
+		poolKey.Fee,
+		poolKey.TickSpacing,
+		poolKey.Hooks,
+	)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	// keccak256
+	hash := sha3.NewLegacyKeccak256()
+	hash.Write(packed)
+	var poolId common.Hash
+	hash.Sum(poolId[:0])
+	return poolId, nil
+}
+
+func getPoolLiquiditySlot(poolId common.Hash, poolMappingSlot uint64) common.Hash {
+	buf := make([]byte, 64)
+	copy(buf[0:32], poolId[:])
+
+	slotBig := new(big.Int).SetUint64(poolMappingSlot)
+	slotBytes := slotBig.FillBytes(make([]byte, 32))
+	copy(buf[32:], slotBytes)
+
+	hash := sha3.NewLegacyKeccak256()
+	hash.Write(buf)
+	var storageSlot common.Hash
+	hash.Sum(storageSlot[:0])
+
+	return storageSlot
+}
+
+func (s *UniswapV4Simulator) getPoolLiquidity(ctx context.Context, poolId common.Hash, poolMappingSlot uint64) (*big.Int, error) {
+	slot := getPoolLiquiditySlot(poolId, poolMappingSlot)
+
+	slotArr := [32]byte{}
+	copy(slotArr[:], slot[:])
+
+	valBytes, err := s.poolManager.Extsload(&bind.CallOpts{Context: ctx}, slotArr)
+	if err != nil {
+		return nil, err
+	}
+
+	liquidity := new(big.Int).SetBytes(valBytes[:])
+	return liquidity, nil
 }
