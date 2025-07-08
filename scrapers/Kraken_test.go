@@ -310,39 +310,39 @@ func TestKrakenFetchTrades_EmptyData(t *testing.T) {
 	}
 }
 
-// func TestKrakenFetchTrades_ParseTradeError(t *testing.T) {
-// 	mockWs := &mockWsConn{
-// 		readJSONQueue: []interface{}{
-// 			krakenWSResponse{
-// 				Channel: "trade",
-// 				Data: []krakenWSResponseData{
-// 					{
-// 						Symbol:    "BTC/USD",
-// 						Side:      "buy",
-// 						Price:     -1,
-// 						Size:      -1,
-// 						OrderType: "market",
-// 						TradeID:   42,
-// 						Time:      "not-a-time",
-// 					},
-// 				},
-// 			},
-// 		},
-// 		readJSONErrs: []error{nil},
-// 	}
-// 	scraper := &krakenScraper{
-// 		wsClient:         mockWs,
-// 		tradesChannel:    make(chan models.Trade, 1),
-// 		tickerPairMap:    map[string]models.Pair{"BTCUSD": {QuoteToken: models.Asset{Symbol: "BTC"}, BaseToken: models.Asset{Symbol: "USD"}}},
-// 		lastTradeTimeMap: map[string]time.Time{},
-// 	}
-// 	var lock sync.RWMutex
-// 	go scraper.fetchTrades(&lock)
-// 	time.Sleep(10 * time.Millisecond)
-// 	select {
-// 	case <-scraper.tradesChannel:
-// 		t.Fatal("should not receive trade for bad timestamp")
-// 	default:
-// 		// pass
-// 	}
-// }
+func TestKrakenFetchTrades_ParseTradeError(t *testing.T) {
+	mockWs := &mockWsConn{
+		readJSONQueue: []interface{}{
+			krakenWSResponse{
+				Channel: "trade",
+				Data: []krakenWSResponseData{
+					{
+						Symbol:    "BTC/USD",
+						Side:      "buy",
+						Price:     -1,
+						Size:      -1,
+						OrderType: "market",
+						TradeID:   42,
+						Time:      "not-a-time",
+					},
+				},
+			},
+		},
+		readJSONErrs: []error{nil},
+	}
+	scraper := &krakenScraper{
+		wsClient:         mockWs,
+		tradesChannel:    make(chan models.Trade, 1),
+		tickerPairMap:    map[string]models.Pair{"BTCUSD": {QuoteToken: models.Asset{Symbol: "BTC"}, BaseToken: models.Asset{Symbol: "USD"}}},
+		lastTradeTimeMap: map[string]time.Time{},
+	}
+	var lock sync.RWMutex
+	go scraper.fetchTrades(&lock)
+	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-scraper.tradesChannel:
+		t.Fatal("should not receive trade for bad timestamp")
+	default:
+		// pass
+	}
+}

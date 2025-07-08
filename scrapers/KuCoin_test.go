@@ -291,11 +291,8 @@ func TestKucoinHandleWSResponse_ParseError(t *testing.T) {
 
 	select {
 	case trade := <-s.tradesChannel:
-		if trade.Price != 0 || trade.Volume != 0 || trade.Time != (time.Time{}) {
-			t.Errorf("expected zero trade values, got: %+v", trade)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected trade, got none")
+		t.Fatalf("expected no trade, got %+v", trade)
+	default:
 	}
 }
 
@@ -329,32 +326,32 @@ func TestKucoinHandleWSResponse_UnmappedPair(t *testing.T) {
 	}
 }
 
-// func TestKucoinHandleWSResponse_InvalidPair(t *testing.T) {
-// 	s := &kucoinScraper{
-// 		tradesChannel: make(chan models.Trade, 1),
-// 		tickerPairMap: map[string]models.Pair{},
-// 	}
-// 	var lock sync.RWMutex
+func TestKucoinHandleWSResponse_InvalidPair(t *testing.T) {
+	s := &kucoinScraper{
+		tradesChannel: make(chan models.Trade, 1),
+		tickerPairMap: map[string]models.Pair{},
+	}
+	var lock sync.RWMutex
 
-// 	msg := kuCoinWSResponse{
-// 		Data: kuCoinWSData{
-// 			Symbol:  "BTCUSDT", // No dash
-// 			Price:   "100.1",
-// 			Size:    "1",
-// 			Side:    "buy",
-// 			TradeID: "foo",
-// 			Time:    "1721923200000",
-// 		},
-// 	}
+	msg := kuCoinWSResponse{
+		Data: kuCoinWSData{
+			Symbol:  "BTCUSDT", // No dash
+			Price:   "100.1",
+			Size:    "1",
+			Side:    "buy",
+			TradeID: "foo",
+			Time:    "1721923200000",
+		},
+	}
 
-// 	s.handleWSResponse(msg, &lock)
+	s.handleWSResponse(msg, &lock)
 
-// 	select {
-// 	case trade := <-s.tradesChannel:
-// 		t.Fatalf("expected no trade, got %+v", trade)
-// 	default:
-// 	}
-// }
+	select {
+	case trade := <-s.tradesChannel:
+		t.Fatalf("expected no trade, got %+v", trade)
+	default:
+	}
+}
 
 func TestKucoinFetchTrades(t *testing.T) {
 	mockWs := &mockWsConn{}
