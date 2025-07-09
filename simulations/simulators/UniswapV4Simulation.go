@@ -46,8 +46,7 @@ var (
 	DIA_Meta_Contract_Precision_V4 = 8
 	priceMap_Update_Seconds_V4     = 30 * 60
 	simulation_Update_Seconds_V4   = 30
-	liquidity_Threshold_USD_V4     = float64(50000)
-	liquidity_Threshold_Native_V4  = float64(2)
+	liquidity_Threshold_V4         = big.NewFloat(205688069689670439852451935292615025620451025342242226750651386564)
 )
 
 func init() {
@@ -65,14 +64,6 @@ func init() {
 	simulation_Update_Seconds_V4, err = strconv.Atoi(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_SIMULATION_UPDATE_SECONDS", strconv.Itoa(simulation_Update_Seconds_V4)))
 	if err != nil {
 		log.Errorf(strings.ToUpper(UNISWAPV4_SIMULATION)+"_SIMULATION_UPDATE_SECONDS: %v", err)
-	}
-	liquidity_Threshold_USD_V4, err = strconv.ParseFloat(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_LIQUIDITY_THRESHOLD_USD", strconv.Itoa(int(liquidity_Threshold_USD_V4))), 64)
-	if err != nil {
-		log.Errorf(strings.ToUpper(UNISWAPV4_SIMULATION)+"_LIQUIDITY_THRESHOLD_USD: %v", err)
-	}
-	liquidity_Threshold_Native_V4, err = strconv.ParseFloat(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_LIQUIDITY_THRESHOLD_NATIVE", strconv.Itoa(int(liquidity_Threshold_Native_V4))), 64)
-	if err != nil {
-		log.Errorf(strings.ToUpper(UNISWAPV4_SIMULATION)+"_LIQUIDITY_THRESHOLD_NATIVE: %v", err)
 	}
 }
 
@@ -181,17 +172,6 @@ func (scraper *UniswapV4Simulator) getPriceFromAPI(asset models.Asset) float64 {
 	return price
 }
 
-func FloatToBigInt(amount float64, decimals uint8) *big.Int {
-	f := new(big.Float).Mul(big.NewFloat(amount), big.NewFloat(0).SetFloat64(float64Pow(10, int(decimals))))
-	result := new(big.Int)
-	f.Int(result)
-	return result
-}
-
-func float64Pow(a, b int) float64 {
-	return float64(new(big.Int).Exp(big.NewInt(int64(a)), big.NewInt(int64(b)), nil).Int64())
-}
-
 func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedTrade) {
 	var wg sync.WaitGroup
 
@@ -202,11 +182,18 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 				defer wg.Done()
 
 				basePrice := s.priceMap[ep.UnderlyingPair.BaseToken].Price
-				amountInBase := amountInUSDConstant / basePrice
+				amountInBase := amountInUSDConstant / basePrice // 100
 
-				decimals := ep.UnderlyingPair.BaseToken.Decimals
-				amountIn := FloatToBigInt(amountInBase, decimals)
-				log.Infof("amountIn & amountInBase: %s | %v", amountIn.String(), amountInBase)
+				decimals := big.NewInt(int64(ep.UnderlyingPair.QuoteToken.Decimals)) // e.g. 18
+				exponent := new(big.Int).Exp(big.NewInt(10), decimals, nil)          // e.g. 10^18
+				exponentFloat := new(big.Float).SetInt(exponent)
+
+				amountIn := new(big.Float).Mul(big.NewFloat(amountInBase), exponentFloat) // e.g. 10^20
+				// log.Infof("amountIn & amountInBase: %s | %v", amountIn.String(), amountInBase)
+				amountInInt := new(big.Int)
+				amountIn.Int(amountInInt)
+				amountInAfterDecimalAdjust := new(big.Float).Quo(amountIn, exponentFloat) // e.g. 10^2
+				log.Infof("amountIn after adjusting for decimals: %v\n", amountInAfterDecimalAdjust)
 
 				fee := new(big.Int)
 				fee.SetString(feeStr, 10)
@@ -228,8 +215,8 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 
 				params := v4quoter.IV4QuoterQuoteExactSingleParams{
 					PoolKey:     poolKey,
-					ZeroForOne:  true,     // or false，depends on the direction
-					ExactAmount: amountIn, // *big.Int
+					ZeroForOne:  true,        // or false，depends on the direction
+					ExactAmount: amountInInt, // *big.Int
 					HookData:    []byte{},
 				}
 
@@ -245,20 +232,31 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 					params.HookData,
 				)
 
+				liquidity, err := s.getPoolLiquidity(context.Background(), poolId, 6)
+				if err != nil {
+					log.Fatalf("Error getting liquidity: %v", err)
+					return
+				}
+				log.Infof("Total liquidity: %s", liquidity.String())
+				log.Infof("Liquidity threshold: %v", liquidity_Threshold_V4)
+				if liquidity.Cmp(big.NewInt(0)) == 0 {
+					log.Infof("Pool (%v - %v - %v) does not exist.", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr)
+					return
+				}
+				// liquidityFloat := new(big.Float).SetInt(liquidity)
+				// if liquidityFloat.Cmp(liquidity_Threshold_V4) < 0 {
+				// 	log.Infof("Liquidity is less than threshold %v: %s", liquidity_Threshold_V4, liquidity.String())
+				// 	return
+				// }
+
 				amountOut, err := s.quoter.QuoteExactInputSingle(&bind.CallOpts{Context: context.Background()}, params)
 				if err != nil {
 					log.Warnf("QuoteExactInputSingle failed: %v", err)
 					return
 				}
 
-				liquidity, err := s.getPoolLiquidity(context.Background(), poolId, 6)
-				if err != nil {
-					log.Fatalf("Error getting liquidity: %v", err)
-				}
-				log.Infof("Total liquidity: %s", liquidity.String())
-
 				amountOutFloat := new(big.Float).SetInt(amountOut.AmountOut)
-				power := ep.UnderlyingPair.QuoteToken.Decimals
+				power := ep.UnderlyingPair.BaseToken.Decimals
 				divisor := new(big.Float).SetInt(
 					new(big.Int).Exp(
 						big.NewInt(10),
@@ -267,17 +265,15 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 					),
 				)
 				amountOutFloat.Quo(amountOutFloat, divisor)
-
-				price := new(big.Float).Quo(new(big.Float).SetFloat64(amountInUSDConstant), amountOutFloat)
-				priceF, _ := price.Float64()
-				amountOutF := WeiToFloat(amountOut.AmountOut, ep.UnderlyingPair.QuoteToken.Decimals)
+				amountOutAfterDecimalAdjustF64, _ := amountOutFloat.Float64()
+				price, _ := new(big.Float).Quo(amountOutFloat, amountInAfterDecimalAdjust).Float64()
 
 				trade := models.SimulatedTrade{
-					Price:       priceF,
-					Volume:      amountOutF,
+					Price:       price,
+					Volume:      amountOutAfterDecimalAdjustF64,
 					QuoteToken:  ep.UnderlyingPair.QuoteToken,
 					BaseToken:   ep.UnderlyingPair.BaseToken,
-					PoolAddress: "0x000000000004444c5dc75cB358380D2e3dE08A90",
+					PoolAddress: poolId.Hex(),
 					Time:        time.Now(),
 					Exchange:    Exchanges[UNISWAPV4_SIMULATION],
 				}
@@ -297,13 +293,6 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 		}
 		wg.Wait()
 	}
-}
-
-func WeiToFloat(amount *big.Int, decimals uint8) float64 {
-	amt := new(big.Float).SetInt(amount)
-	dec := new(big.Float).SetFloat64(float64Pow(10, int(decimals)))
-	val, _ := new(big.Float).Quo(amt, dec).Float64()
-	return val
 }
 
 func ComputePoolId(poolKey v4quoter.PoolKey) (common.Hash, error) {
