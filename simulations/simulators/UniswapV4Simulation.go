@@ -2,6 +2,7 @@ package simulators
 
 import (
 	"context"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -16,17 +17,20 @@ import (
 
 	v4quoter "github.com/diadata-org/lumina-library/contracts/uniswapv4/V4Quoter"
 	poolManager "github.com/diadata-org/lumina-library/contracts/uniswapv4/poolManager"
+	poolState "github.com/diadata-org/lumina-library/contracts/uniswapv4/poolState"
 	"github.com/diadata-org/lumina-library/models"
 	"github.com/diadata-org/lumina-library/utils"
 )
 
 type UniswapV4Simulator struct {
-	restClient    *ethclient.Client
-	luminaClient  *ethclient.Client
-	quoter        *v4quoter.V4Quoter
-	poolManager   *poolManager.PoolManager
-	exchangepairs []models.ExchangePair
-	priceMap      map[models.Asset]models.AssetQuotation
+	restClient        *ethclient.Client
+	luminaClient      *ethclient.Client
+	quoter            *v4quoter.V4Quoter
+	poolManager       *poolManager.PoolManager
+	poolState         *poolState.PoolState
+	exchangepairs     []models.ExchangePair
+	priceMap          map[models.Asset]models.AssetQuotation
+	slippageThreshold float64
 }
 
 var (
@@ -34,19 +38,18 @@ var (
 	restLuminaUrl = ""
 	// Amount in USD that is used to simulate trades.
 	amountInUSDConstant = float64(100)
-	feeToTickSpacing    = map[string]*big.Int{
-		"10":    big.NewInt(1),
-		"500":   big.NewInt(10),
-		"3000":  big.NewInt(60),
-		"10000": big.NewInt(200),
-	}
-
 	// TO DO: Put the following variables to environment variables.
 	DIA_Meta_Contract_Address_V4   = "0x0087342f5f4c7AB23a37c045c3EF710749527c88"
 	DIA_Meta_Contract_Precision_V4 = 8
 	priceMap_Update_Seconds_V4     = 30 * 60
 	simulation_Update_Seconds_V4   = 30
-	liquidity_Threshold_V4         = big.NewFloat(205688069689670439852451935292615025620451025342242226750651386564)
+	// liquidity_Threshold_V4         = big.NewInt(10000000000)
+	feeToTickSpacing = map[string]*big.Int{
+		"10":    big.NewInt(1),
+		"500":   big.NewInt(10),
+		"3000":  big.NewInt(60),
+		"10000": big.NewInt(200),
+	}
 )
 
 func init() {
@@ -99,6 +102,16 @@ func NewUniswapV4Simulator(exchangepairs []models.ExchangePair, tradesChannel ch
 	s.poolManager, err = poolManager.NewPoolManager(common.HexToAddress(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_POOLMANAGER", "0x000000000004444c5dc75cB358380D2e3dE08A90")), s.restClient)
 	if err != nil {
 		log.Fatal("Failed to instantiate PoolManager: ", err)
+	}
+
+	s.poolState, err = poolState.NewPoolState(common.HexToAddress(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_POOLSTATE", "0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227")), s.restClient)
+	if err != nil {
+		log.Fatal("Failed to instantiate PoolState: ", err)
+	}
+
+	s.slippageThreshold, err = strconv.ParseFloat(utils.Getenv("UNISWAPV4_SLIPPAGE_THRESHOLD", "0.1"), 64)
+	if err != nil {
+		log.Error("Failed to parse slippahe threshold: ", err)
 	}
 
 	err = s.getExchangePairs()
@@ -175,10 +188,16 @@ func (scraper *UniswapV4Simulator) getPriceFromAPI(asset models.Asset) float64 {
 func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedTrade) {
 	var wg sync.WaitGroup
 
+	invalidFeeTiers := &sync.Map{}
 	for _, ep := range s.exchangepairs {
 		for feeStr, tickSpacing := range feeToTickSpacing {
+			key := ep.UnderlyingPair.QuoteToken.Symbol + "-" + ep.UnderlyingPair.BaseToken.Symbol + ":" + feeStr
+			if _, exists := invalidFeeTiers.Load(key); exists {
+				continue
+			}
+
 			wg.Add(1)
-			go func(ep models.ExchangePair) {
+			go func(ep models.ExchangePair, key string) {
 				defer wg.Done()
 
 				basePrice := s.priceMap[ep.UnderlyingPair.BaseToken].Price
@@ -189,7 +208,6 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 				exponentFloat := new(big.Float).SetInt(exponent)
 
 				amountIn := new(big.Float).Mul(big.NewFloat(amountInBase), exponentFloat) // e.g. 10^20
-				// log.Infof("amountIn & amountInBase: %s | %v", amountIn.String(), amountInBase)
 				amountInInt := new(big.Int)
 				amountIn.Int(amountInInt)
 				amountInAfterDecimalAdjust := new(big.Float).Quo(amountIn, exponentFloat) // e.g. 10^2
@@ -232,26 +250,42 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 					params.HookData,
 				)
 
-				liquidity, err := s.getPoolLiquidity(context.Background(), poolId, 6)
+				liquidity, err := s.poolState.GetLiquidity(&bind.CallOpts{Context: context.Background()}, poolId)
 				if err != nil {
 					log.Fatalf("Error getting liquidity: %v", err)
+					invalidFeeTiers.Store(key, true)
 					return
 				}
-				log.Infof("Total liquidity: %s", liquidity.String())
-				log.Infof("Liquidity threshold: %v", liquidity_Threshold_V4)
 				if liquidity.Cmp(big.NewInt(0)) == 0 {
-					log.Infof("Pool (%v - %v - %v) does not exist.", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr)
+					log.Warnf("Pool (%v - %v - %v) does not exist.", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr)
+					invalidFeeTiers.Store(key, true)
 					return
 				}
-				// liquidityFloat := new(big.Float).SetInt(liquidity)
-				// if liquidityFloat.Cmp(liquidity_Threshold_V4) < 0 {
-				// 	log.Infof("Liquidity is less than threshold %v: %s", liquidity_Threshold_V4, liquidity.String())
+
+				// if liquidity.Cmp(liquidity_Threshold_V4) < 0 {
+				// 	log.Warnf("Liquidity is less than threshold %v: %v", liquidity_Threshold_V4, liquidity)
+				// 	invalidFeeTiers.Store(key, true)
 				// 	return
 				// }
 
 				amountOut, err := s.quoter.QuoteExactInputSingle(&bind.CallOpts{Context: context.Background()}, params)
 				if err != nil {
 					log.Warnf("QuoteExactInputSingle failed: %v", err)
+					invalidFeeTiers.Store(key, true)
+					return
+				}
+				poolState, err := s.poolState.GetSlot0(&bind.CallOpts{Context: context.Background()}, poolId)
+				if err != nil {
+					log.Fatalf("Error getting sqrtPriceX96: %v", err)
+					invalidFeeTiers.Store(key, true)
+					return
+				}
+
+				slippage := computeSlippage(poolState.SqrtPriceX96, amountInInt, amountOut.AmountOut, liquidity)
+				log.Infof("Slippage: %v", slippage)
+
+				if slippage > s.slippageThreshold {
+					log.Warnf("Slippage is greater than threshold %v: %v", s.slippageThreshold, slippage)
 					return
 				}
 
@@ -289,7 +323,7 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 					trade.Price,
 					trade.Volume,
 				)
-			}(ep)
+			}(ep, key)
 		}
 		wg.Wait()
 	}
@@ -337,33 +371,15 @@ func ComputePoolId(poolKey v4quoter.PoolKey) (common.Hash, error) {
 	return poolId, nil
 }
 
-func getPoolLiquiditySlot(poolId common.Hash, poolMappingSlot uint64) common.Hash {
-	buf := make([]byte, 64)
-	copy(buf[0:32], poolId[:])
+func computeSlippage(sqrtPriceX96 *big.Int, amount0 *big.Int, amount1 *big.Int, liquidity *big.Int) (slippage float64) {
+	log.Infof("sqrtPrice -- amount0 -- amount1 -- liquidity: %v -- %v -- %v -- %v", sqrtPriceX96, amount0, amount1, liquidity)
 
-	slotBig := new(big.Int).SetUint64(poolMappingSlot)
-	slotBytes := slotBig.FillBytes(make([]byte, 32))
-	copy(buf[32:], slotBytes)
+	price := new(big.Float).Quo(big.NewFloat(0).SetInt(sqrtPriceX96), new(big.Float).SetFloat64(math.Pow(2, 96)))
 
-	hash := sha3.NewLegacyKeccak256()
-	hash.Write(buf)
-	var storageSlot common.Hash
-	hash.Sum(storageSlot[:0])
+	// token0 -> token1 since ZeroForOne is true
+	amount0Abs := big.NewInt(0).Abs(amount0)
+	numerator := big.NewFloat(0).Mul(big.NewFloat(0).SetInt(amount0Abs), price)
+	slippage, _ = new(big.Float).Quo(numerator, big.NewFloat(0).SetInt(liquidity)).Float64()
 
-	return storageSlot
-}
-
-func (s *UniswapV4Simulator) getPoolLiquidity(ctx context.Context, poolId common.Hash, poolMappingSlot uint64) (*big.Int, error) {
-	slot := getPoolLiquiditySlot(poolId, poolMappingSlot)
-
-	slotArr := [32]byte{}
-	copy(slotArr[:], slot[:])
-
-	valBytes, err := s.poolManager.Extsload(&bind.CallOpts{Context: ctx}, slotArr)
-	if err != nil {
-		return nil, err
-	}
-
-	liquidity := new(big.Int).SetBytes(valBytes[:])
-	return liquidity, nil
+	return slippage
 }
