@@ -43,8 +43,7 @@ var (
 	DIA_Meta_Contract_Precision_V4 = 8
 	priceMap_Update_Seconds_V4     = 30 * 60
 	simulation_Update_Seconds_V4   = 30
-	// liquidity_Threshold_V4         = big.NewInt(10000000000)
-	feeToTickSpacing = map[string]*big.Int{
+	feeToTickSpacing               = map[string]*big.Int{
 		"10":    big.NewInt(1),
 		"500":   big.NewInt(10),
 		"3000":  big.NewInt(60),
@@ -185,58 +184,93 @@ func (scraper *UniswapV4Simulator) getPriceFromAPI(asset models.Asset) float64 {
 	return price
 }
 
+func (s *UniswapV4Simulator) filterValidFeeTiers(ep models.ExchangePair) map[string]*big.Int {
+	validFeeTiers := make(map[string]*big.Int)
+
+	for feeStr, tickSpacing := range feeToTickSpacing {
+		_, _, poolId, liquidity, params := s.getPoolState(ep, feeStr, tickSpacing)
+
+		if poolId != (common.Hash{}) && liquidity != nil {
+			_, err := s.quoter.QuoteExactInputSingle(&bind.CallOpts{Context: context.Background()}, params)
+			if err != nil {
+				log.Warnf("QuoteExactInputSingle failed for pool %s - %s - %s (%s): %v", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, poolId.Hex(), err)
+				continue
+			}
+		} else {
+			log.Warnf("Pool %s - %s - %s (%s) is not valid", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, poolId.Hex())
+			continue
+		}
+		validFeeTiers[feeStr] = tickSpacing
+	}
+
+	return validFeeTiers
+}
+
+func (s *UniswapV4Simulator) getAmountIn(ep models.ExchangePair) (*big.Int, *big.Float) {
+	basePrice := s.priceMap[ep.UnderlyingPair.BaseToken].Price
+	amountInBase := amountInUSDConstant / basePrice // 100
+
+	decimals := big.NewInt(int64(ep.UnderlyingPair.QuoteToken.Decimals)) // e.g. 18
+	exponent := new(big.Int).Exp(big.NewInt(10), decimals, nil)          // e.g. 10^18
+	exponentFloat := new(big.Float).SetInt(exponent)
+
+	amountIn := new(big.Float).Mul(big.NewFloat(amountInBase), exponentFloat) // e.g. 10^20
+	amountInInt := new(big.Int)
+	amountIn.Int(amountInInt)
+
+	amountInAfterDecimalAdjust := new(big.Float).Quo(amountIn, exponentFloat) // e.g. 10^2
+
+	return amountInInt, amountInAfterDecimalAdjust
+}
+
+func (s *UniswapV4Simulator) getPoolState(ep models.ExchangePair, feeStr string, tickSpacing *big.Int) (*big.Int, *big.Float, common.Hash, *big.Int, v4quoter.IV4QuoterQuoteExactSingleParams) {
+	fee := new(big.Int)
+	fee.SetString(feeStr, 10)
+	poolKey := v4quoter.PoolKey{
+		Currency0:   common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address),
+		Currency1:   common.HexToAddress(ep.UnderlyingPair.BaseToken.Address),
+		Fee:         fee,
+		TickSpacing: tickSpacing,
+		Hooks:       common.Address{},
+	}
+
+	amountInInt, amountInAfterDecimalAdjust := s.getAmountIn(ep)
+
+	poolId, err := ComputePoolId(poolKey)
+	if err != nil {
+		log.Warnf("ComputePoolId failed for %s: %v", feeStr, err)
+		return amountInInt, amountInAfterDecimalAdjust, common.Hash{}, nil, v4quoter.IV4QuoterQuoteExactSingleParams{}
+	}
+
+	liquidity, err := s.poolState.GetLiquidity(&bind.CallOpts{Context: context.Background()}, poolId)
+	if err != nil || liquidity.Cmp(big.NewInt(0)) == 0 {
+		log.Warnf("Liquidity check failed for pool %s - %s - %s", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr)
+		return amountInInt, amountInAfterDecimalAdjust, poolId, nil, v4quoter.IV4QuoterQuoteExactSingleParams{}
+	}
+
+	params := v4quoter.IV4QuoterQuoteExactSingleParams{
+		PoolKey:     poolKey,
+		ZeroForOne:  true,
+		ExactAmount: amountInInt, // small dummy amount
+		HookData:    []byte{},
+	}
+
+	return amountInInt, amountInAfterDecimalAdjust, poolId, liquidity, params
+}
+
 func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedTrade) {
 	var wg sync.WaitGroup
 
-	invalidFeeTiers := &sync.Map{}
 	for _, ep := range s.exchangepairs {
-		for feeStr, tickSpacing := range feeToTickSpacing {
-			key := ep.UnderlyingPair.QuoteToken.Symbol + "-" + ep.UnderlyingPair.BaseToken.Symbol + ":" + feeStr
-			if _, exists := invalidFeeTiers.Load(key); exists {
-				continue
-			}
-
+		validFeeTiers := s.filterValidFeeTiers(ep)
+		for feeStr, tickSpacing := range validFeeTiers {
 			wg.Add(1)
-			go func(ep models.ExchangePair, key string) {
+			go func(ep models.ExchangePair) {
 				defer wg.Done()
 
-				basePrice := s.priceMap[ep.UnderlyingPair.BaseToken].Price
-				amountInBase := amountInUSDConstant / basePrice // 100
+				amountInInt, amountInAfterDecimalAdjust, poolId, liquidity, params := s.getPoolState(ep, feeStr, tickSpacing)
 
-				decimals := big.NewInt(int64(ep.UnderlyingPair.QuoteToken.Decimals)) // e.g. 18
-				exponent := new(big.Int).Exp(big.NewInt(10), decimals, nil)          // e.g. 10^18
-				exponentFloat := new(big.Float).SetInt(exponent)
-
-				amountIn := new(big.Float).Mul(big.NewFloat(amountInBase), exponentFloat) // e.g. 10^20
-				amountInInt := new(big.Int)
-				amountIn.Int(amountInInt)
-				amountInAfterDecimalAdjust := new(big.Float).Quo(amountIn, exponentFloat) // e.g. 10^2
 				log.Infof("amountIn after adjusting for decimals: %v\n", amountInAfterDecimalAdjust)
-
-				fee := new(big.Int)
-				fee.SetString(feeStr, 10)
-				poolKey := v4quoter.PoolKey{
-					Currency0:   common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address), // USDC
-					Currency1:   common.HexToAddress(ep.UnderlyingPair.BaseToken.Address),  // USDT
-					Fee:         fee,                                                       // 0.001% | 0.05% | 0.3% | 1%
-					TickSpacing: tickSpacing,                                               // 1 | 10 | 60 | 200
-					Hooks:       common.HexToAddress("0x0000000000000000000000000000000000000000"),
-				}
-
-				poolId, err := ComputePoolId(poolKey)
-				if err != nil {
-					log.Warnf("ComputePoolId failed: %v", err)
-					return
-				} else {
-					log.Infof("PoolId: %s", poolId.Hex())
-				}
-
-				params := v4quoter.IV4QuoterQuoteExactSingleParams{
-					PoolKey:     poolKey,
-					ZeroForOne:  true,        // or false，depends on the direction
-					ExactAmount: amountInInt, // *big.Int
-					HookData:    []byte{},
-				}
 
 				log.Infof(
 					"[UniswapV4 Simulate] PoolKey: {Token0: %s, Token1: %s, Fee: %d, TickSpacing: %s, Hooks: %s} | ZeroForOne: %v | ExactAmount: %s | HookData: %x",
@@ -250,34 +284,14 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 					params.HookData,
 				)
 
-				liquidity, err := s.poolState.GetLiquidity(&bind.CallOpts{Context: context.Background()}, poolId)
-				if err != nil {
-					log.Fatalf("Error getting liquidity: %v", err)
-					invalidFeeTiers.Store(key, true)
-					return
-				}
-				if liquidity.Cmp(big.NewInt(0)) == 0 {
-					log.Warnf("Pool (%v - %v - %v) does not exist.", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr)
-					invalidFeeTiers.Store(key, true)
-					return
-				}
-
-				// if liquidity.Cmp(liquidity_Threshold_V4) < 0 {
-				// 	log.Warnf("Liquidity is less than threshold %v: %v", liquidity_Threshold_V4, liquidity)
-				// 	invalidFeeTiers.Store(key, true)
-				// 	return
-				// }
-
 				amountOut, err := s.quoter.QuoteExactInputSingle(&bind.CallOpts{Context: context.Background()}, params)
 				if err != nil {
 					log.Warnf("QuoteExactInputSingle failed: %v", err)
-					invalidFeeTiers.Store(key, true)
 					return
 				}
 				poolState, err := s.poolState.GetSlot0(&bind.CallOpts{Context: context.Background()}, poolId)
 				if err != nil {
 					log.Fatalf("Error getting sqrtPriceX96: %v", err)
-					invalidFeeTiers.Store(key, true)
 					return
 				}
 
@@ -318,12 +332,12 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 					ep.UnderlyingPair.QuoteToken.Symbol,
 					feeStr,
 					tickSpacing.String(),
-					amountIn.String(),
+					amountInAfterDecimalAdjust.String(),
 					amountOut.AmountOut.String(),
 					trade.Price,
 					trade.Volume,
 				)
-			}(ep, key)
+			}(ep)
 		}
 		wg.Wait()
 	}
