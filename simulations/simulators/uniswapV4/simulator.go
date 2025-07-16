@@ -1,4 +1,4 @@
-package uniswapv4
+package uniswap
 
 import (
 	"context"
