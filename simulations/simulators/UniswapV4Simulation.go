@@ -19,6 +19,7 @@ import (
 	poolManager "github.com/diadata-org/lumina-library/contracts/uniswapv4/poolManager"
 	poolState "github.com/diadata-org/lumina-library/contracts/uniswapv4/poolState"
 	"github.com/diadata-org/lumina-library/models"
+	simulation "github.com/diadata-org/lumina-library/simulations/simulators/uniswapv4"
 	"github.com/diadata-org/lumina-library/utils"
 )
 
@@ -31,6 +32,7 @@ type UniswapV4Simulator struct {
 	exchangepairs     []models.ExchangePair
 	priceMap          map[models.Asset]models.AssetQuotation
 	slippageThreshold float64
+	simulator         *simulation.Simulator
 }
 
 var (
@@ -91,6 +93,8 @@ func NewUniswapV4Simulator(exchangepairs []models.ExchangePair, tradesChannel ch
 		log.Info("Successfully connected to lumina node")
 	}
 	defer s.luminaClient.Close()
+
+	s.simulator = simulation.New(s.restClient, log)
 
 	quoterAddr := common.HexToAddress(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_QUOTER", "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203"))
 	s.quoter, err = v4quoter.NewV4Quoter(quoterAddr, s.restClient)
@@ -192,6 +196,7 @@ func (s *UniswapV4Simulator) filterValidFeeTiers(ep models.ExchangePair) map[str
 
 		if poolId != (common.Hash{}) && liquidity != nil {
 			_, err := s.quoter.QuoteExactInputSingle(&bind.CallOpts{Context: context.Background()}, params)
+
 			if err != nil {
 				log.Warnf("QuoteExactInputSingle failed for pool %s - %s - %s (%s): %v", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, poolId.Hex(), err)
 				continue
@@ -284,7 +289,7 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 					params.HookData,
 				)
 
-				amountOut, err := s.quoter.QuoteExactInputSingle(&bind.CallOpts{Context: context.Background()}, params)
+				amountOut, err := s.simulator.Execute(s.quoter, params)
 				if err != nil {
 					log.Warnf("QuoteExactInputSingle failed: %v", err)
 					return
