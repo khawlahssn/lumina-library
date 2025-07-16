@@ -19,7 +19,7 @@ import (
 	poolManager "github.com/diadata-org/lumina-library/contracts/uniswapv4/poolManager"
 	poolState "github.com/diadata-org/lumina-library/contracts/uniswapv4/poolState"
 	"github.com/diadata-org/lumina-library/models"
-	simulation "github.com/diadata-org/lumina-library/simulations/simulators/uniswapv4"
+	simulation "github.com/diadata-org/lumina-library/simulations/simulators/uniswapV4"
 	"github.com/diadata-org/lumina-library/utils"
 )
 
