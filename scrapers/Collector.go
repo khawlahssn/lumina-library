@@ -74,7 +74,7 @@ func Collector(
 				}
 
 				tradesblockChannel <- tradesblockMap
-				log.Infof("Collector - number of tradesblocks: %v.", len(tradesblockMap))
+				log.Infof("Collector - number of tradesblocks at %v: %v.", time.Now(), len(tradesblockMap))
 
 				// Make a new tradesblockMap for the next trigger period.
 				tradesblockMap = make(map[string]models.TradesBlock)

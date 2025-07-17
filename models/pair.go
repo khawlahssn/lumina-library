@@ -45,7 +45,15 @@ func ExchangePairsFromEnv(
 
 	// epMap maps an exchange on a slice of the underlying pair symbol tickers.
 	epMap := make(map[string][]string)
-	for _, ep := range strings.Split(exchangePairsEnv, envSeparator) {
+	list := strings.Split(exchangePairsEnv, envSeparator)
+	if len(list) == 0 {
+		return
+	}
+	if len(list) == 1 && len(strings.TrimSpace(list[0])) == 0 {
+		return
+	}
+
+	for _, ep := range list {
 		exchange := strings.TrimSpace(strings.Split(ep, exchangePairSeparator)[0])
 		pairSymbol := strings.TrimSpace(strings.Split(ep, exchangePairSeparator)[1])
 		epMap[exchange] = append(epMap[exchange], pairSymbol)
