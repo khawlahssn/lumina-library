@@ -95,7 +95,9 @@ func (scraper *UniswapV3Scraper) mainLoop(ctx context.Context, pools []models.Po
 	for _, pool := range pools {
 
 		// Initialize lastTradeTimeMap.
+		lock.Lock()
 		scraper.lastTradeTimeMap[common.HexToAddress(pool.Address)] = time.Now()
+		lock.Unlock()
 
 		// Set up watchdog.
 		envVar := strings.ToUpper(scraper.exchange.Name) + "_WATCHDOG_" + pool.Address
@@ -169,7 +171,9 @@ func (scraper *UniswapV3Scraper) watchSwaps(ctx context.Context, poolAddress com
 						t := makeTrade(pair, price, volume, time.Unix(swap.Timestamp, 0), poolAddress, swap.ID, scraper.exchange.Name, scraper.exchange.Blockchain)
 
 						// Update lastTradeTimeMap
+						lock.Lock()
 						scraper.lastTradeTimeMap[poolAddress] = t.Time
+						lock.Unlock()
 
 						if pair.Order == 0 {
 							tradesChannel <- t
@@ -217,7 +221,9 @@ func (scraper *UniswapV3Scraper) watchSwaps(ctx context.Context, poolAddress com
 						t := makeTrade(pair, price, volume, time.Unix(swap.Timestamp, 0), poolAddress, swap.ID, scraper.exchange.Name, scraper.exchange.Blockchain)
 
 						// Update lastTradeTimeMap
+						lock.Lock()
 						scraper.lastTradeTimeMap[poolAddress] = t.Time
+						lock.Unlock()
 
 						if pair.Order == 0 {
 							tradesChannel <- t
@@ -401,7 +407,7 @@ func makeTrade(
 }
 
 func logTrade(t models.Trade) {
-	log.Infof(
+	log.Debugf(
 		"Got trade at time %v - symbol: %s, pair: %s, price: %v, volume:%v",
 		t.Time, t.QuoteToken.Symbol, t.QuoteToken.Symbol+"-"+t.BaseToken.Symbol, t.Price, t.Volume)
 }

@@ -70,7 +70,7 @@ func watchdogPool(
 			log.Debugf("%s - duration for %s: %v. Threshold: %v.", exchange, pool.Hex(), duration, watchdogDelay)
 			lock.RUnlock()
 			if duration > time.Duration(watchdogDelay)*time.Second {
-				log.Errorf("%s - watchdogTicker failover for %s.", exchange, pool.Hex())
+				log.Warnf("%s - watchdogTicker failover for %s.", exchange, pool.Hex())
 				subscribeChannel <- pool
 			}
 		case <-ctx.Done():
