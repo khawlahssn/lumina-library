@@ -171,7 +171,6 @@ func (scraper *UniswapV3Scraper) watchSwaps(ctx context.Context, poolAddress com
 						// Update lastTradeTimeMap
 						scraper.lastTradeTimeMap[poolAddress] = t.Time
 
-						log.Info("tx hash: ", swap.ID)
 						if pair.Order == 0 {
 							tradesChannel <- t
 						} else if pair.Order == 1 {
@@ -374,7 +373,6 @@ func (scraper *UniswapV3Scraper) normalizeUniV3Swap(swapI interface{}) (normaliz
 
 func getSwapDataUniV3(swap UniswapV3Swap) (price float64, volume float64) {
 	volume = swap.Amount0
-	log.Infof("amount0 -- amount1: %v -- %v", swap.Amount0, swap.Amount1)
 	price = math.Abs(swap.Amount1 / swap.Amount0)
 	return
 }
