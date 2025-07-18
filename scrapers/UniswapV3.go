@@ -219,7 +219,6 @@ func (scraper *UniswapV3Scraper) watchSwaps(ctx context.Context, poolAddress com
 						// Update lastTradeTimeMap
 						scraper.lastTradeTimeMap[poolAddress] = t.Time
 
-						log.Info("tx hash: ", swap.ID)
 						if pair.Order == 0 {
 							tradesChannel <- t
 						} else if pair.Order == 1 {
