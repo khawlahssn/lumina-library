@@ -14,8 +14,10 @@ const (
 	KRAKEN_EXCHANGE       = "Kraken"
 	KUCOIN_EXCHANGE       = "KuCoin"
 
-	UNISWAPV2_EXCHANGE = "UniswapV2"
-	UNISWAP_SIMULATION = "UniswapSimulation"
+	UNISWAPV2_EXCHANGE     = "UniswapV2"
+	UNISWAPV3_EXCHANGE     = "UniswapV3"
+	PANCAKESWAPV3_EXCHANGE = "PancakeswapV3"
+	UNISWAP_SIMULATION     = "UniswapSimulation"
 )
 
 var (
