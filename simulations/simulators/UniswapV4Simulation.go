@@ -167,14 +167,32 @@ func (scraper *UniswapV4Simulator) getSufficientLiquidityPools(lock *sync.RWMute
 
 func (s *UniswapV4Simulator) getExchangePairs() error {
 	for i, ep := range s.exchangepairs {
-		quote, err := models.GetAsset(common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address), Exchanges[UNISWAPV4_SIMULATION].Blockchain, s.restClient)
-		if err != nil {
-			return err
+		var quote, base models.Asset
+		var err error
+		var zeroAddressHex = common.Address{}.Hex()
+
+		if ep.UnderlyingPair.QuoteToken.Address == zeroAddressHex {
+			quote.Address = "0x0000000000000000000000000000000000000000"
+			quote.Decimals = 18
+			quote.Symbol = "ETH"
+		} else {
+			quote, err = models.GetAsset(common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address), Exchanges[UNISWAPV4_SIMULATION].Blockchain, s.restClient)
+			if err != nil {
+				return err
+			}
 		}
-		base, err := models.GetAsset(common.HexToAddress(ep.UnderlyingPair.BaseToken.Address), Exchanges[UNISWAPV4_SIMULATION].Blockchain, s.restClient)
-		if err != nil {
-			return err
+
+		if ep.UnderlyingPair.BaseToken.Address == zeroAddressHex {
+			base.Address = "0x0000000000000000000000000000000000000000"
+			base.Decimals = 18
+			base.Symbol = "ETH"
+		} else {
+			base, err = models.GetAsset(common.HexToAddress(ep.UnderlyingPair.BaseToken.Address), Exchanges[UNISWAPV4_SIMULATION].Blockchain, s.restClient)
+			if err != nil {
+				return err
+			}
 		}
+
 		s.exchangepairs[i].UnderlyingPair.QuoteToken = quote
 		s.exchangepairs[i].UnderlyingPair.BaseToken = base
 		s.priceMap[quote] = models.AssetQuotation{}
@@ -309,7 +327,7 @@ func (s *UniswapV4Simulator) getPoolState(ep models.ExchangePair, feeStr string,
 
 func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedTrade) {
 	var wg sync.WaitGroup
-	// Sample all pools : {WBTC/USDC: {poolId: {params, liquidity, feeStr, tickSpacing}}}
+	// Sample allPools : {WBTC/USDC: {poolId: {params, liquidity, feeStr, tickSpacing}}}
 	for ep, pools := range s.allPools {
 		quoteToken := ep.UnderlyingPair.QuoteToken
 		baseToken := ep.UnderlyingPair.BaseToken
@@ -337,10 +355,10 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 
 				// since the trade is from token0 to token1, the slippage is computed as the amount of token1 received / amount of token0 sent
 				slippage := computeSlippage(poolState.SqrtPriceX96, amountInInt, amountOut.AmountOut, liquidity)
-				log.Infof("Slippage: %v", slippage)
+				log.Infof("Slippage for pool %v | %v - %v - %v: %v", poolId.Hex(), ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, slippage)
 
 				if slippage > s.slippageThreshold {
-					log.Warnf("Slippage is greater than threshold %v: %v", s.slippageThreshold, slippage)
+					log.Warnf("Slippage for pool %v - %v - %v is greater than threshold %v: %v", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, s.slippageThreshold, slippage)
 					return
 				}
 
