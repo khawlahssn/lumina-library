@@ -375,10 +375,12 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 				amountOutAfterDecimalAdjustF64, _ := amountOutFloat.Float64()
 				price, _ := new(big.Float).Quo(amountOutFloat, amountInAfterDecimalAdjust).Float64()
 				log.Infof("amountOut: %v", amountOutAfterDecimalAdjustF64)
+				basePrice := s.priceMap[ep.UnderlyingPair.BaseToken].Price
+				volume := basePrice / price
 
 				trade := models.SimulatedTrade{
 					Price:       price,
-					Volume:      amountOutAfterDecimalAdjustF64,
+					Volume:      volume,
 					QuoteToken:  quoteToken,
 					BaseToken:   baseToken,
 					PoolAddress: poolId.Hex(),
