@@ -43,11 +43,22 @@ func (a *Asset) GetOnchainPrice(metacontractAddress common.Address, precision in
 		return
 	}
 	priceBig, timeUnixBig, err := caller.GetValue(&bind.CallOpts{}, a.Symbol+"/USD")
-	if err != nil {
-		return
+	if err != nil || priceBig.Cmp(big.NewInt(0)) == 0 || priceBig == nil {
+		priceFloat64, err := utils.GetPriceFromDiaAPI(a.Address, a.Blockchain)
+		if err != nil {
+			log.Errorf("Failed to retrieve price from both on-chain and the DIA API: %v\n", err)
+			priceFloat64 = 1
+		}
+		assetQuotation.Price = priceFloat64
+	} else {
+		assetQuotation.Price, _ = new(big.Float).Mul(new(big.Float).SetInt(priceBig), big.NewFloat(math.Pow10(-precision))).Float64()
 	}
-	assetQuotation.Time = time.Unix(timeUnixBig.Int64(), 0)
-	assetQuotation.Price, _ = new(big.Float).Mul(new(big.Float).SetInt(priceBig), big.NewFloat(math.Pow10(-precision))).Float64()
+	if timeUnixBig != nil {
+		assetQuotation.Time = time.Unix(timeUnixBig.Int64(), 0)
+	} else {
+		assetQuotation.Time = time.Now()
+	}
+
 	assetQuotation.Asset = *a
 	assetQuotation.Source = "DIA_Lumina_" + metacontractAddress.Hex()
 

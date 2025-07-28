@@ -214,6 +214,10 @@ func RunScraper(
 
 	case UNISWAPV2_EXCHANGE:
 		NewUniswapV2Scraper(pools, tradesChannel, wg)
+	case UNISWAPV3_EXCHANGE:
+		NewUniswapV3Scraper(ctx, exchange, utils.ETHEREUM, pools, tradesChannel, wg)
+	case PANCAKESWAPV3_EXCHANGE:
+		NewUniswapV3Scraper(ctx, exchange, utils.BINANCESMARTCHAIN, pools, tradesChannel, wg)
 
 	}
 }

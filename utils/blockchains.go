@@ -1,6 +1,7 @@
 package utils
 
 const (
-	ETHEREUM = "Ethereum"
-	BITCOIN  = "Bitcoin"
+	BINANCESMARTCHAIN = "BinanceSmartChain"
+	BITCOIN           = "Bitcoin"
+	ETHEREUM          = "Ethereum"
 )

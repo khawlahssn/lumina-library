@@ -18,6 +18,18 @@ type Trade struct {
 	EstimatedUSDPrice float64
 }
 
+// SwapTrade swaps base and quote token of a trade and inverts the price accordingly
+func (t *Trade) SwapTrade() error {
+	if t.Price == 0 {
+		return errors.New("zero price. cannot swap trade")
+	}
+	t.BaseToken, t.QuoteToken = t.QuoteToken, t.BaseToken
+	t.Volume = -t.Price * t.Volume
+	t.Price = 1 / t.Price
+
+	return nil
+}
+
 // Struct for decentralized scraper pools.
 // TO DO: Revisit fields.
 type TradesBlock struct {
