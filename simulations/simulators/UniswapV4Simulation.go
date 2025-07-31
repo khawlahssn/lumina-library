@@ -55,11 +55,12 @@ var (
 	simulation_Update_Seconds_V4   = 30
 	feeToTickSpacing               = map[string]*big.Int{
 		"10":    big.NewInt(1),
+		"100":   big.NewInt(1),
 		"500":   big.NewInt(10),
 		"3000":  big.NewInt(60),
 		"10000": big.NewInt(200),
 	}
-	liquidityThresholdV4 = big.NewInt(100000000000000)
+	liquidityThresholdV4 = big.NewInt(100000000)
 )
 
 func init() {
@@ -81,92 +82,85 @@ func init() {
 }
 
 func NewUniswapV4Simulator(exchangepairs []models.ExchangePair, tradesChannel chan models.SimulatedTrade) {
-	s := &UniswapV4Simulator{
+	scraper := &UniswapV4Simulator{
 		exchangepairs: exchangepairs,
 		priceMap:      make(map[models.Asset]models.AssetQuotation),
 	}
 
 	var err error
-	s.restClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_URI_REST", restUrl))
+	scraper.restClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_URI_REST", restUrl))
 	if err != nil {
 		log.Fatal("Failed to connect to ETH node: ", err)
 	} else {
 		log.Info("Successfully connected to node")
 	}
-	defer s.restClient.Close()
+	defer scraper.restClient.Close()
 
-	s.luminaClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_LUMINA_URI_REST", restLuminaUrl))
+	scraper.luminaClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_LUMINA_URI_REST", restLuminaUrl))
 	if err != nil {
 		log.Error("init lumina client: ", err)
 	} else {
 		log.Info("Successfully connected to lumina node")
 	}
-	defer s.luminaClient.Close()
+	defer scraper.luminaClient.Close()
 
-	s.simulator = simulation.New(s.restClient, log)
+	liquidityThresholdV4Int, err := strconv.ParseInt(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_LIQUIDITY_THRESHOLD", "1000000000"), 10, 64)
+	if err != nil {
+		log.Errorf(strings.ToUpper(UNISWAPV4_SIMULATION)+"_LIQUIDITY_THRESHOLD: %v", err)
+	} else {
+		liquidityThresholdV4 = big.NewInt(liquidityThresholdV4Int)
+	}
+
+	scraper.simulator = simulation.New(scraper.restClient, log)
 
 	quoterAddr := common.HexToAddress(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_QUOTER", "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203"))
-	s.quoter, err = v4quoter.NewV4Quoter(quoterAddr, s.restClient)
+	scraper.quoter, err = v4quoter.NewV4Quoter(quoterAddr, scraper.restClient)
 	if err != nil {
 		log.Fatal("Failed to instantiate V4Quoter: ", err)
 	}
 
-	s.poolManager, err = poolManager.NewPoolManager(common.HexToAddress(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_POOLMANAGER", "0x000000000004444c5dc75cB358380D2e3dE08A90")), s.restClient)
+	scraper.poolManager, err = poolManager.NewPoolManager(common.HexToAddress(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_POOLMANAGER", "0x000000000004444c5dc75cB358380D2e3dE08A90")), scraper.restClient)
 	if err != nil {
 		log.Fatal("Failed to instantiate PoolManager: ", err)
 	}
 
-	s.poolState, err = poolState.NewPoolState(common.HexToAddress(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_POOLSTATE", "0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227")), s.restClient)
+	scraper.poolState, err = poolState.NewPoolState(common.HexToAddress(utils.Getenv(strings.ToUpper(UNISWAPV4_SIMULATION)+"_POOLSTATE", "0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227")), scraper.restClient)
 	if err != nil {
 		log.Fatal("Failed to instantiate PoolState: ", err)
 	}
 
-	s.slippageThreshold, err = strconv.ParseFloat(utils.Getenv("UNISWAPV4_SLIPPAGE_THRESHOLD", "0.1"), 64)
+	scraper.slippageThreshold, err = strconv.ParseFloat(utils.Getenv("UNISWAPV4_SLIPPAGE_THRESHOLD", "0.1"), 64)
 	if err != nil {
 		log.Error("Failed to parse slippahe threshold: ", err)
 	}
 
-	err = s.getExchangePairs()
+	err = scraper.getExchangePairs()
 	if err != nil {
 		log.Fatal("Failed to get exchange pairs: ", err)
 	}
 
 	var lock sync.RWMutex
-	s.updatePriceMap(&lock)
-	s.getSufficientLiquidityPools(&lock)
+	scraper.updatePriceMap(&lock)
+	scraper.getSufficientLiquidityPools(&lock)
 
 	priceTicker := time.NewTicker(time.Duration(priceMapUpdateSeconds) * time.Second)
 	go func() {
 		for range priceTicker.C {
-			s.updatePriceMap(&lock)
-			s.getSufficientLiquidityPools(&lock)
+			scraper.updatePriceMap(&lock)
+			scraper.getSufficientLiquidityPools(&lock)
 		}
 	}()
 
 	ticker := time.NewTicker(30 * time.Second)
 	for range ticker.C {
-		s.simulateTrades(tradesChannel)
+		scraper.simulateTrades(tradesChannel)
 	}
 }
 
-func (scraper *UniswapV4Simulator) getSufficientLiquidityPools(lock *sync.RWMutex) {
-
-	scraper.allPools = make(map[models.ExchangePair]map[common.Hash]PoolState)
-	for _, ep := range scraper.exchangepairs {
-		pools := scraper.getPoolsBasedOnExchanagePair(ep)
-		if scraper.allPools[ep] == nil {
-			scraper.allPools[ep] = make(map[common.Hash]PoolState)
-		}
-		for poolId, poolState := range pools {
-			lock.Lock()
-			scraper.allPools[ep][poolId] = poolState
-			lock.Unlock()
-		}
-	}
-}
-
-func (s *UniswapV4Simulator) getExchangePairs() error {
-	for i, ep := range s.exchangepairs {
+// getExchangePairs maps the underlying assets on @scraper.exchangepairs slice, including the
+// specific handling of ETH asset. It also initializes the @scraper.priceMap.
+func (scraper *UniswapV4Simulator) getExchangePairs() error {
+	for i, ep := range scraper.exchangepairs {
 		var quote, base models.Asset
 		var err error
 		var zeroAddressHex = common.Address{}.Hex()
@@ -175,8 +169,9 @@ func (s *UniswapV4Simulator) getExchangePairs() error {
 			quote.Address = "0x0000000000000000000000000000000000000000"
 			quote.Decimals = 18
 			quote.Symbol = "ETH"
+			quote.Blockchain = utils.ETHEREUM
 		} else {
-			quote, err = models.GetAsset(common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address), Exchanges[UNISWAPV4_SIMULATION].Blockchain, s.restClient)
+			quote, err = models.GetAsset(common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address), Exchanges[UNISWAPV4_SIMULATION].Blockchain, scraper.restClient)
 			if err != nil {
 				return err
 			}
@@ -186,21 +181,24 @@ func (s *UniswapV4Simulator) getExchangePairs() error {
 			base.Address = "0x0000000000000000000000000000000000000000"
 			base.Decimals = 18
 			base.Symbol = "ETH"
+			quote.Blockchain = utils.ETHEREUM
 		} else {
-			base, err = models.GetAsset(common.HexToAddress(ep.UnderlyingPair.BaseToken.Address), Exchanges[UNISWAPV4_SIMULATION].Blockchain, s.restClient)
+			base, err = models.GetAsset(common.HexToAddress(ep.UnderlyingPair.BaseToken.Address), Exchanges[UNISWAPV4_SIMULATION].Blockchain, scraper.restClient)
 			if err != nil {
 				return err
 			}
 		}
 
-		s.exchangepairs[i].UnderlyingPair.QuoteToken = quote
-		s.exchangepairs[i].UnderlyingPair.BaseToken = base
-		s.priceMap[quote] = models.AssetQuotation{}
-		s.priceMap[base] = models.AssetQuotation{}
+		scraper.exchangepairs[i].UnderlyingPair.QuoteToken = quote
+		scraper.exchangepairs[i].UnderlyingPair.BaseToken = base
+		scraper.priceMap[quote] = models.AssetQuotation{}
+		scraper.priceMap[base] = models.AssetQuotation{}
 	}
 	return nil
 }
 
+// updatePriceMap fetches the latest price of all observed assets from the diadata meta contract.
+// If not existing in the meta contract, if fetches the price from diadata API.
 func (scraper *UniswapV4Simulator) updatePriceMap(lock *sync.RWMutex) {
 	for asset := range scraper.priceMap {
 		quotation, err := asset.GetOnchainPrice(common.HexToAddress(DIAMetaContractAddress), DIAMetaContractPrecision, scraper.luminaClient)
@@ -219,38 +217,43 @@ func (scraper *UniswapV4Simulator) updatePriceMap(lock *sync.RWMutex) {
 	}
 }
 
-func (scraper *UniswapV4Simulator) getPriceFromAPI(asset models.Asset) float64 {
-	log.Warnf("Could not determine price of %s on chain. Checking DIA API.", asset.Symbol)
-	price, err := utils.GetPriceFromDiaAPI(asset.Address, asset.Blockchain)
-	if err != nil {
-		log.Errorf("Failed to get price of %s from DIA API: %v\n", asset.Symbol, err)
-		log.Errorf("asset blockchain: %v\n", asset.Blockchain)
-		log.Errorf("asset address: %v\n", asset.Address)
-		price = 100
-	} else {
-		log.Infof("Fetched price of %s from DIA API: %.4f", asset.Symbol, price)
+// getSufficientLiquidityPools fetches all pools given through the POOLS env var which
+// fulfill given liquidity criteria.
+func (scraper *UniswapV4Simulator) getSufficientLiquidityPools(lock *sync.RWMutex) {
+
+	scraper.allPools = make(map[models.ExchangePair]map[common.Hash]PoolState)
+	for _, ep := range scraper.exchangepairs {
+		pools := scraper.getPoolsBasedOnExchangePair(ep)
+		if scraper.allPools[ep] == nil {
+			scraper.allPools[ep] = make(map[common.Hash]PoolState)
+		}
+		for poolId, poolState := range pools {
+			lock.Lock()
+			scraper.allPools[ep][poolId] = poolState
+			lock.Unlock()
+		}
 	}
-	return price
 }
 
-func (s *UniswapV4Simulator) getPoolsBasedOnExchanagePair(ep models.ExchangePair) map[common.Hash]PoolState {
+// getPoolsBasedOnExchangePair returns all UniV4 pools for a given asset pair in a @models.Exchangepair.
+func (scraper *UniswapV4Simulator) getPoolsBasedOnExchangePair(ep models.ExchangePair) map[common.Hash]PoolState {
 	pools := make(map[common.Hash]PoolState)
 
 	for feeStr, tickSpacing := range feeToTickSpacing {
-		_, _, poolId, liquidity, params := s.getPoolState(ep, feeStr, tickSpacing)
+		_, _, poolId, liquidity, params := scraper.getPoolState(ep, feeStr, tickSpacing)
 
 		// Check if the pool exists
 		if poolId != (common.Hash{}) && liquidity != nil {
 			// Check if the pool has sufficient liquidity
 			if liquidity.Cmp(liquidityThresholdV4) >= 0 {
-				// Check if potential simulation is valid
-				_, err := s.quoter.QuoteExactInputSingle(&bind.CallOpts{Context: context.Background()}, params)
 
+				// Check if potential simulation is valid
+				_, err := scraper.quoter.QuoteExactInputSingle(&bind.CallOpts{Context: context.Background()}, params)
 				if err != nil {
 					log.Warnf("Invalid Pool - QuoteExactInputSingle failed for pool %s - %s - %s (%s): %v", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, poolId.Hex(), err)
 					continue
 				} else {
-					log.Infof("Pool %s - %s - %s (%s) has sufficient liquidity", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, poolId.Hex())
+					log.Infof("Pool %s - %s - %s (%s) has sufficient liquidity: %s", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, poolId.Hex(), liquidity.String())
 					pools[poolId] = PoolState{
 						FeeStr:      feeStr,
 						TickSpacing: tickSpacing,
@@ -260,8 +263,8 @@ func (s *UniswapV4Simulator) getPoolsBasedOnExchanagePair(ep models.ExchangePair
 				}
 
 			} else {
-				log.Warnf("Pool %s - %s - %s (%s) does not have sufficient liquidity", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, poolId.Hex())
-				continue
+				log.Warnf("Pool %s - %s - %s (%s) does not have sufficient liquidity: %s", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, poolId.Hex(), liquidity.String())
+				// continue
 			}
 		} else {
 			log.Warnf("Pool %s - %s - %s (%s) does not exist", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, poolId.Hex())
@@ -272,44 +275,65 @@ func (s *UniswapV4Simulator) getPoolsBasedOnExchanagePair(ep models.ExchangePair
 	return pools
 }
 
-func (s *UniswapV4Simulator) getAmountIn(ep models.ExchangePair) (*big.Int, *big.Float) {
-	basePrice := s.priceMap[ep.UnderlyingPair.BaseToken].Price
-	amountInBase := amountInUSDConstant / basePrice // 100
+// getAmountIn returns the amountIn for a trade simulation corresponding to the base token amount
+// equivalent to @amountInUSDConstant (usually 100$).
+func (scraper *UniswapV4Simulator) getAmountIn(ep models.ExchangePair) (*big.Int, float64) {
 
-	decimals := big.NewInt(int64(ep.UnderlyingPair.QuoteToken.Decimals)) // e.g. 18
-	exponent := new(big.Int).Exp(big.NewInt(10), decimals, nil)          // e.g. 10^18
+	// log.Warnf("compute amount in for %s-%s", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol)
+	basePrice := scraper.priceMap[ep.UnderlyingPair.BaseToken].Price
+	amountInFloat := amountInUSDConstant / basePrice // 100
+	// log.Warnf("basePrice -- amountInBase: %v -- %v", basePrice, amountInFloat)
+
+	decimals := big.NewInt(int64(ep.UnderlyingPair.BaseToken.Decimals)) // e.g. 18
+	exponent := new(big.Int).Exp(big.NewInt(10), decimals, nil)         // e.g. 10^18
 	exponentFloat := new(big.Float).SetInt(exponent)
 
-	amountIn := new(big.Float).Mul(big.NewFloat(amountInBase), exponentFloat) // e.g. 10^20
-	amountInInt := new(big.Int)
-	amountIn.Int(amountInInt)
+	amountIn := new(big.Float).Mul(big.NewFloat(amountInFloat), exponentFloat) // e.g. 10^20
+	amountInBig := new(big.Int)
+	amountIn.Int(amountInBig)
 
-	amountInAfterDecimalAdjust := new(big.Float).Quo(amountIn, exponentFloat) // e.g. 10^2
+	// log.Warnf("getAmountIn -------------- amountInInt -- amountInAfterDecimalsAdjust: %v -- %s", amountInBig.String(), amountIn.String())
 
-	return amountInInt, amountInAfterDecimalAdjust
+	return amountInBig, amountInFloat
 }
 
-func (s *UniswapV4Simulator) getPoolState(ep models.ExchangePair, feeStr string, tickSpacing *big.Int) (*big.Int, *big.Float, common.Hash, *big.Int, v4quoter.IV4QuoterQuoteExactSingleParams) {
+// getPoolState returns all parameters needed for a simulation of the unique pool
+// given by an asset pair, a fee value and a tick spacing.
+func (scraper *UniswapV4Simulator) getPoolState(ep models.ExchangePair, feeStr string, tickSpacing *big.Int) (*big.Int, float64, common.Hash, *big.Int, v4quoter.IV4QuoterQuoteExactSingleParams) {
 	fee := new(big.Int)
 	fee.SetString(feeStr, 10)
-	poolKey := v4quoter.PoolKey{
-		Currency0:   common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address),
-		Currency1:   common.HexToAddress(ep.UnderlyingPair.BaseToken.Address),
-		Fee:         fee,
-		TickSpacing: tickSpacing,
-		Hooks:       common.Address{},
+
+	// Sort tokens in lexicographical order w.r.t. address. Also amend zeroForOne var below as needed.
+	var poolKey v4quoter.PoolKey
+	swapOrder := sortExchangepairLexicographically(ep)
+	if swapOrder {
+		poolKey = v4quoter.PoolKey{
+			Currency0:   common.HexToAddress(ep.UnderlyingPair.BaseToken.Address),
+			Currency1:   common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address),
+			Fee:         fee,
+			TickSpacing: tickSpacing,
+			Hooks:       common.Address{},
+		}
+	} else {
+		poolKey = v4quoter.PoolKey{
+			Currency0:   common.HexToAddress(ep.UnderlyingPair.QuoteToken.Address),
+			Currency1:   common.HexToAddress(ep.UnderlyingPair.BaseToken.Address),
+			Fee:         fee,
+			TickSpacing: tickSpacing,
+			Hooks:       common.Address{},
+		}
 	}
 
-	amountInInt, amountInAfterDecimalAdjust := s.getAmountIn(ep)
+	amountInInt, amountInAfterDecimalAdjust := scraper.getAmountIn(ep)
 
 	// In Uniswap V4, the poolId is computed from the poolKey. There is no pool Address for each pool.
-	poolId, err := ComputePoolId(poolKey)
+	poolId, err := computePoolId(poolKey)
 	if err != nil {
-		log.Warnf("ComputePoolId failed for %s: %v", feeStr, err)
+		log.Warnf("computePoolId failed for %s: %v", feeStr, err)
 		return amountInInt, amountInAfterDecimalAdjust, common.Hash{}, nil, v4quoter.IV4QuoterQuoteExactSingleParams{}
 	}
 
-	liquidity, err := s.poolState.GetLiquidity(&bind.CallOpts{Context: context.Background()}, poolId)
+	liquidity, err := scraper.poolState.GetLiquidity(&bind.CallOpts{Context: context.Background()}, poolId)
 	if err != nil || liquidity.Cmp(big.NewInt(0)) == 0 {
 		log.Warnf("Liquidity check failed for pool %s - %s - %s", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr)
 		return amountInInt, amountInAfterDecimalAdjust, poolId, nil, v4quoter.IV4QuoterQuoteExactSingleParams{}
@@ -317,7 +341,7 @@ func (s *UniswapV4Simulator) getPoolState(ep models.ExchangePair, feeStr string,
 
 	params := v4quoter.IV4QuoterQuoteExactSingleParams{
 		PoolKey:     poolKey,
-		ZeroForOne:  true, // trade from token0 to token1
+		ZeroForOne:  swapOrder, // if assets are in correct order, we should swap asset1 for asset0.
 		ExactAmount: amountInInt,
 		HookData:    []byte{},
 	}
@@ -325,62 +349,52 @@ func (s *UniswapV4Simulator) getPoolState(ep models.ExchangePair, feeStr string,
 	return amountInInt, amountInAfterDecimalAdjust, poolId, liquidity, params
 }
 
-func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedTrade) {
+// simulateTrades simulates trades in all filtered pools.
+func (scraper *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedTrade) {
 	var wg sync.WaitGroup
 	// Sample allPools : {WBTC/USDC: {poolId: {params, liquidity, feeStr, tickSpacing}}}
-	for ep, pools := range s.allPools {
+	for ep, pools := range scraper.allPools {
 		quoteToken := ep.UnderlyingPair.QuoteToken
 		baseToken := ep.UnderlyingPair.BaseToken
 		for poolId, poolStates := range pools {
 			params := poolStates.Params
+			// log.Infof("poolkey -- zeroforone --  exactamount -- hookdata: %v -- %v -- %v -- %v ", params.PoolKey, params.ZeroForOne, params.ExactAmount, params.HookData)
 			liquidity := poolStates.Liquidity
 			feeStr := poolStates.FeeStr
 			wg.Add(1)
 			go func(ep models.ExchangePair) {
 				defer wg.Done()
-				amountInInt, amountInAfterDecimalAdjust := s.getAmountIn(ep)
+				amountInInt, amountIn := scraper.getAmountIn(ep)
 
-				log.Infof("amountIn after adjusting for decimals: %v\n", amountInAfterDecimalAdjust)
-
-				amountOut, err := s.simulator.Execute(s.quoter, params)
+				amountOut, err := scraper.simulator.Execute(scraper.quoter, params)
 				if err != nil {
 					log.Warnf("QuoteExactInputSingle failed: %v", err)
 					return
 				}
-				poolState, err := s.poolState.GetSlot0(&bind.CallOpts{Context: context.Background()}, poolId)
+				// log.Infof("amountOut for fee %s: %v", feeStr, amountOut.AmountOut.String())
+				// log.Infof("params for fee %s: %v -- %v -- %s", feeStr, params.ZeroForOne, params.PoolKey, params.ExactAmount.String())
+
+				poolState, err := scraper.poolState.GetSlot0(&bind.CallOpts{Context: context.Background()}, poolId)
 				if err != nil || poolState.SqrtPriceX96.Cmp(big.NewInt(0)) == 0 {
 					log.Fatalf("Error getting sqrtPriceX96: %v", err)
 					return
 				}
 
 				// since the trade is from token0 to token1, the slippage is computed as the amount of token1 received / amount of token0 sent
-				slippage := computeSlippage(poolState.SqrtPriceX96, amountInInt, amountOut.AmountOut, liquidity)
-				log.Infof("Slippage for pool %v | %v - %v - %v: %v", poolId.Hex(), ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, slippage)
+				slippage := computeSlippage(poolState.SqrtPriceX96, amountInInt, liquidity)
+				log.Infof("Slippage for pool %v | %v - %v - fee %v: %v", poolId.Hex(), ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, slippage)
 
-				if slippage > s.slippageThreshold {
-					log.Warnf("Slippage for pool %v - %v - %v is greater than threshold %v: %v", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, s.slippageThreshold, slippage)
+				if slippage > scraper.slippageThreshold {
+					log.Warnf("Slippage for pool %v - %v - %v is greater than threshold %v: %v", ep.UnderlyingPair.QuoteToken.Symbol, ep.UnderlyingPair.BaseToken.Symbol, feeStr, scraper.slippageThreshold, slippage)
 					return
 				}
 
-				amountOutFloat := new(big.Float).SetInt(amountOut.AmountOut)
-				power := baseToken.Decimals
-				divisor := new(big.Float).SetInt(
-					new(big.Int).Exp(
-						big.NewInt(10),
-						big.NewInt(int64(power)),
-						nil,
-					),
-				)
-				amountOutFloat.Quo(amountOutFloat, divisor)
-				amountOutAfterDecimalAdjustF64, _ := amountOutFloat.Float64()
-				price, _ := new(big.Float).Quo(amountOutFloat, amountInAfterDecimalAdjust).Float64()
-				log.Infof("amountOut: %v", amountOutAfterDecimalAdjustF64)
-				basePrice := s.priceMap[ep.UnderlyingPair.BaseToken].Price
-				volume := basePrice / price
+				amountOutFloat, _ := new(big.Float).Quo(big.NewFloat(0).SetInt(amountOut.AmountOut), new(big.Float).SetFloat64(math.Pow10(int(quoteToken.Decimals)))).Float64()
+				price := amountIn / amountOutFloat
 
 				trade := models.SimulatedTrade{
 					Price:       price,
-					Volume:      volume,
+					Volume:      amountOutFloat,
 					QuoteToken:  quoteToken,
 					BaseToken:   baseToken,
 					PoolAddress: poolId.Hex(),
@@ -396,7 +410,20 @@ func (s *UniswapV4Simulator) simulateTrades(tradesChannel chan models.SimulatedT
 	}
 }
 
-func ComputePoolId(poolKey v4quoter.PoolKey) (common.Hash, error) {
+// getPriceFromAPI returns the price of @asset in diadata API.
+func (scraper *UniswapV4Simulator) getPriceFromAPI(asset models.Asset) float64 {
+	log.Warnf("Could not determine price of %s on chain. Checking DIA API.", asset.Symbol)
+	price, err := utils.GetPriceFromDiaAPI(asset.Address, asset.Blockchain)
+	if err != nil {
+		price = 1
+		log.Errorf("Failed to get price of %s (blockchain -- address: %s -- %s) from DIA API: %v. Set to default %v", asset.Symbol, asset.Blockchain, asset.Address, err, price)
+	} else {
+		log.Infof("Fetched price of %s from DIA API: %.4f", asset.Symbol, price)
+	}
+	return price
+}
+
+func computePoolId(poolKey v4quoter.PoolKey) (common.Hash, error) {
 	uint24Type, err := abi.NewType("uint24", "", nil)
 	if err != nil {
 		return common.Hash{}, err
@@ -438,15 +465,26 @@ func ComputePoolId(poolKey v4quoter.PoolKey) (common.Hash, error) {
 	return poolId, nil
 }
 
-func computeSlippage(sqrtPriceX96 *big.Int, amount0 *big.Int, amount1 *big.Int, liquidity *big.Int) (slippage float64) {
-	log.Infof("sqrtPrice -- amount0 -- amount1 -- liquidity: %v -- %v -- %v -- %v", sqrtPriceX96, amount0, amount1, liquidity)
+func computeSlippage(sqrtPriceX96 *big.Int, amountIn *big.Int, liquidity *big.Int) (slippage float64) {
+	// log.Infof("sqrtPrice -- amount0 -- amount1 -- liquidity: %v -- %v -- %v -- %v", sqrtPriceX96, amount0, amount1, liquidity)
 
 	price := new(big.Float).Quo(big.NewFloat(0).SetInt(sqrtPriceX96), new(big.Float).SetFloat64(math.Pow(2, 96)))
 
 	// token0 -> token1 since ZeroForOne is true
-	amount0Abs := big.NewInt(0).Abs(amount0)
+	amount0Abs := big.NewInt(0).Abs(amountIn)
 	numerator := big.NewFloat(0).Mul(big.NewFloat(0).SetInt(amount0Abs), price)
 	slippage, _ = new(big.Float).Quo(numerator, big.NewFloat(0).SetInt(liquidity)).Float64()
 
 	return slippage
+}
+
+// sortExchangepairLexicographically returns true, if the order of the assets has to be swapped in quoter contract.
+// In UniV4 quoter contract, assets must be sorted in lexicographical order w.r.t. address when quoteExactInputSingle is queried.
+// @swap can thereby also be used as @zeroForOne variable.
+func sortExchangepairLexicographically(ep models.ExchangePair) (swap bool) {
+	if ep.UnderlyingPair.QuoteToken.Address < ep.UnderlyingPair.BaseToken.Address {
+		return
+	}
+	swap = true
+	return
 }
