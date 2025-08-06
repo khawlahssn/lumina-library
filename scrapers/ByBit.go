@@ -74,7 +74,7 @@ func NewByBitScraper(ctx context.Context, pairs []models.ExchangePair, failoverC
 
 	for _, pair := range pairs {
 		if err := scraper.subscribe(pair, true, &lock); err != nil {
-			log.Errorf("ByBit - Failed to subscribe to %v: %v", pair, err)
+			log.Errorf("ByBit - Failed to subscribe to %v: %v", pair.ForeignName, err)
 		} else {
 			log.Infof("ByBit - Subscribed to %v", pair)
 			scraper.lastTradeTimeMap[pair.ForeignName] = time.Now()
@@ -205,6 +205,10 @@ func (scraper *byBitScraper) handleMessage(message []byte, lock *sync.RWMutex) {
 			BaseToken:  pair.BaseToken,
 			QuoteToken: pair.QuoteToken,
 		}
+
+		lock.Lock()
+		scraper.lastTradeTimeMap[pair.QuoteToken.Symbol+"-"+pair.BaseToken.Symbol] = time.Now()
+		lock.Unlock()
 
 		scraper.tradesChannel <- trade
 		log.Tracef("ByBit - Trade: %s-%s | Price: %f | Volume: %f", pair.BaseToken.Symbol, pair.QuoteToken.Symbol, price, volume)
