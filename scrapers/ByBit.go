@@ -122,7 +122,6 @@ func (scraper *byBitScraper) startByBitPing(ctx context.Context) {
 			log.Info("ByBit - Ping routine stopped.")
 			return
 		case <-ticker.C:
-			// err := wsClient.WriteMessage(ws.PingMessage, []byte{})
 			err := scraper.safeWriteMessage(ws.PingMessage, []byte{})
 			if err != nil {
 				log.Errorf("ByBit - Ping error: %v", err)
@@ -183,6 +182,11 @@ func (scraper *byBitScraper) handleMessage(message []byte, lock *sync.RWMutex) {
 		}
 
 		volume, err := strconv.ParseFloat(data.Size, 64)
+		side := data.Side
+		if side == "Sell" {
+			volume = -1 * volume
+		}
+
 		if err != nil {
 			log.Errorf("ByBit - Invalid volume: %v", err)
 			return
@@ -211,7 +215,7 @@ func (scraper *byBitScraper) handleMessage(message []byte, lock *sync.RWMutex) {
 		lock.Unlock()
 
 		scraper.tradesChannel <- trade
-		log.Tracef("ByBit - Trade: %s-%s | Price: %f | Volume: %f", pair.BaseToken.Symbol, pair.QuoteToken.Symbol, price, volume)
+		log.Infof("ByBit - Trade: %s-%s | Side: %v | Price: %f | Volume: %f", pair.BaseToken.Symbol, pair.QuoteToken.Symbol, side, price, volume)
 	}
 }
 
