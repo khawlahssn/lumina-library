@@ -15,6 +15,7 @@ const (
 	KRAKEN_EXCHANGE       = "Kraken"
 	KUCOIN_EXCHANGE       = "KuCoin"
 	OKEX_EXCHANGE         = "OKEx"
+	MEXC_EXCHANGE         = "MEXC"
 
 	UNISWAPV2_EXCHANGE     = "UniswapV2"
 	UNISWAPV3_EXCHANGE     = "UniswapV3"
@@ -36,6 +37,8 @@ func init() {
 	Exchanges[GATEIO_EXCHANGE] = models.Exchange{Name: GATEIO_EXCHANGE, Centralized: true}
 	Exchanges[KRAKEN_EXCHANGE] = models.Exchange{Name: KRAKEN_EXCHANGE, Centralized: true}
 	Exchanges[KUCOIN_EXCHANGE] = models.Exchange{Name: KUCOIN_EXCHANGE, Centralized: true}
+	Exchanges[MEXC_EXCHANGE] = models.Exchange{Name: MEXC_EXCHANGE, Centralized: true}
+	Exchanges[OKEX_EXCHANGE] = models.Exchange{Name: OKEX_EXCHANGE, Centralized: true}
 
 	Exchanges[UNISWAP_SIMULATION] = models.Exchange{Name: UNISWAP_SIMULATION, Centralized: false, Simulation: true, Blockchain: utils.ETHEREUM}
 	Exchanges[UNISWAPV2_EXCHANGE] = models.Exchange{Name: UNISWAPV2_EXCHANGE, Centralized: false, Blockchain: utils.ETHEREUM}
