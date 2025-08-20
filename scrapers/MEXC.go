@@ -30,6 +30,7 @@ type MEXCScraper struct {
 	restartWaitTime  int
 	genesis          time.Time
 	maxSubscriptions int
+	pairConnIndex    map[string]int
 }
 
 var (
@@ -52,21 +53,38 @@ func NewMEXCScraper(ctx context.Context, pairs []models.ExchangePair, failoverCh
 		genesis:          time.Now(),
 		maxSubscriptions: maxSubscriptionPerConn,
 		connections:      make([]WSConnection, 0),
+		pairConnIndex:    make(map[string]int),
 	}
 
-	if err := scraper.newConn(); err != nil {
+	if _, err := scraper.newConn(failoverChannel); err != nil {
 		log.Errorf("MEXC - newConn failed: %v.", err)
-		failoverChannel <- string(MEXC_EXCHANGE)
 		return &scraper
+	}
+
+	// Ping connections to keep them alive.
+	for _, c := range scraper.connections {
+		go func() {
+			pingMsg := map[string]string{"method": "PING"}
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				log.Infof("MEXC - Sent Ping...")
+				if err := c.wsConn.WriteJSON(pingMsg); err != nil {
+					log.Error("ping error: ", err)
+					return
+				}
+			}
+		}()
 	}
 
 	// Subscribe to pairs and initialize MEXCLastTradeTimeMap.
 	for _, pair := range pairs {
-		if err := scraper.subscribe(pair, true, &lock); err != nil {
+		if err := scraper.subscribe(pair, true, failoverChannel, &lock); err != nil {
 			log.Errorf("MEXC - subscribe to pair %s: %v.", pair.ForeignName, err)
 		} else {
 			log.Debugf("MEXC - Subscribed to pair %s:%s.", MEXC_EXCHANGE, pair.ForeignName)
 			scraper.lastTradeTimeMap[pair.ForeignName] = time.Now()
+			log.Infof("MEXC - %v lastTradeTimeMap: %v", pair.ForeignName, scraper.lastTradeTimeMap[pair.ForeignName])
 		}
 	}
 
@@ -83,18 +101,19 @@ func NewMEXCScraper(ctx context.Context, pairs []models.ExchangePair, failoverCh
 		}
 		watchdogTicker := time.NewTicker(time.Duration(watchdogDelay) * time.Second)
 		go watchdog(ctx, pair, watchdogTicker, scraper.lastTradeTimeMap, watchdogDelay, scraper.subscribeChannel, &lock)
-		go scraper.resubscribe(ctx, &lock)
+		go scraper.resubscribe(ctx, failoverChannel, &lock)
 	}
 
 	return &scraper
 }
 
-func (s *MEXCScraper) newConn() error {
+func (s *MEXCScraper) newConn(failoverChannel chan string) (*WSConnection, error) {
 	var wsDialer ws.Dialer
 	wsClient, _, err := wsDialer.Dial(MEXCWSBaseString, nil)
 	if err != nil {
 		log.Errorf("MEXC - Failed to open WebSocket connection: %v", err)
-		return err
+		failoverChannel <- string(MEXC_EXCHANGE)
+		return nil, err
 	}
 	conn := WSConnection{
 		wsConn:           wsClient,
@@ -102,7 +121,7 @@ func (s *MEXCScraper) newConn() error {
 	}
 	s.connections = append(s.connections, conn)
 	log.Infof("MEXC - New WS connection established. Total connections: %d", len(s.connections))
-	return nil
+	return &s.connections[len(s.connections)-1], nil
 }
 
 func (scraper *MEXCScraper) Close(cancel context.CancelFunc) error {
@@ -200,80 +219,106 @@ func (scraper *MEXCScraper) handleWSResponse(message *mexcproto.PublicAggreDeals
 		trade.QuoteToken = scraper.tickerPairMap[pair].QuoteToken
 		trade.BaseToken = scraper.tickerPairMap[pair].BaseToken
 
-		log.Infof("MEXC - got trade: %s -- %v -- %v -- %s.", trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol, trade.Price, trade.Volume, trade.ForeignTradeID)
+		log.Infof("MEXC - got trade: %s -- %v -- %v -- %s -- %v.", trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol, trade.Price, trade.Volume, trade.ForeignTradeID, trade.Time)
 		lock.Lock()
 		scraper.lastTradeTimeMap[trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol] = trade.Time
+		log.Infof("MEXC - %v lastTradeTimeMap now: %v", trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol, scraper.lastTradeTimeMap[trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol])
 		lock.Unlock()
 		scraper.tradesChannel <- trade
 	}
 
 }
 
-func (scraper *MEXCScraper) resubscribe(ctx context.Context, lock *sync.RWMutex) {
+func (s *MEXCScraper) resubscribe(ctx context.Context, failoverChannel chan string, lock *sync.RWMutex) {
+	log.Warnf("MEXC - resubscribe loop started")
 	for {
 		select {
-		case pair := <-scraper.subscribeChannel:
-			err := scraper.subscribe(pair, false, lock)
+		case pair := <-s.subscribeChannel:
+			err := s.subscribe(pair, false, failoverChannel, lock) // unsubscribe first
 			if err != nil {
-				log.Errorf("MEXC - Unsubscribe pair %s: %v.", pair.ForeignName, err)
-			} else {
-				log.Debugf("MEXC - Unsubscribed pair %s.", pair.ForeignName)
+				log.Errorf("MEXC - Unsubscribe failed for %s: %v", pair.ForeignName, err)
 			}
 			time.Sleep(2 * time.Second)
-			err = scraper.subscribe(pair, true, lock)
+
+			err = s.subscribe(pair, true, failoverChannel, lock)
 			if err != nil {
-				log.Errorf("MEXC - Resubscribe pair %s: %v.", pair.ForeignName, err)
-			} else {
-				log.Debugf("MEXC - Subscribed to pair %s.", pair.ForeignName)
+				log.Errorf("MEXC - Resubscribe failed for %s: %v", pair.ForeignName, err)
 			}
+
 		case <-ctx.Done():
-			log.Debugf("MEXC - Close resubscribe routine of scraper with genesis: %v.", scraper.genesis)
+			log.Debugf("MEXC - Close resubscribe routine of scraper with genesis: %v.", s.genesis)
 			return
 		}
 	}
 }
 
-func (s *MEXCScraper) subscribe(pair models.ExchangePair, subscribe bool, lock *sync.RWMutex) error {
+func (s *MEXCScraper) subscribe(pair models.ExchangePair, subscribe bool, failoverChannel chan string, lock *sync.RWMutex) error {
 	defer lock.Unlock()
-	subscribeType := "UNSUBSCRIPTION"
-	if subscribe {
-		subscribeType = "SUBSCRIPTION"
-	}
-	// if no connection, create a new one
-	if len(s.connections) == 0 {
-		if err := s.newConn(); err != nil {
-			return err
-		}
-	}
 
-	// current connection index
-	id := len(s.connections) - 1
-
-	// if current connection is full, create a new one
-	if s.connections[id].numSubscriptions >= s.maxSubscriptions {
-		if err := s.newConn(); err != nil {
-			return err
-		}
-		id++
-	}
-
-	// build subscription message
 	foreignName := strings.ReplaceAll(pair.ForeignName, "-", "")
+	topic := "spot@public.aggre.deals.v3.api.pb@100ms@" + foreignName
+
+	log.Infof("MEXC - subscribe to %s", topic)
+
 	subscriptionMessage := map[string]interface{}{
-		"method": subscribeType,
-		"params": []string{"spot@public.aggre.deals.v3.api.pb@100ms@" + foreignName},
+		"method": "UNSUBSCRIPTION",
+		"params": []string{topic},
 	}
+	if subscribe {
+		subscriptionMessage["method"] = "SUBSCRIPTION"
+	}
+
 	subMsg, _ := json.Marshal(subscriptionMessage)
 
-	lock.Lock()
-	err := s.connections[id].wsConn.WriteMessage(ws.TextMessage, subMsg)
-	if err != nil {
-		log.Errorf("MEXC - Subscribe failed: %v", err)
-		return err
+	if subscribe {
+		// Try to find an existing connection with available slots
+		var targetConnID int = -1
+		for i, conn := range s.connections {
+			if conn.numSubscriptions < s.maxSubscriptions {
+				targetConnID = i
+				break
+			}
+		}
+
+		// If all are full, create a new connection
+		if targetConnID == -1 {
+			if _, err := s.newConn(failoverChannel); err != nil {
+				log.Errorf("MEXC - Failed to create new connection for %s: %v", pair.ForeignName, err)
+				return err
+			}
+			targetConnID = len(s.connections) - 1
+		}
+
+		lock.Lock()
+		err := s.connections[targetConnID].wsConn.WriteMessage(ws.TextMessage, subMsg)
+		if err != nil {
+			log.Errorf("MEXC - Failed to send SUBSCRIPTION message for %s: %v", pair.ForeignName, err)
+			return err
+		}
+
+		s.connections[targetConnID].numSubscriptions++
+		s.pairConnIndex[pair.ForeignName] = targetConnID
+		log.Infof("MEXC - Subscribed to %s on connection %d", pair.ForeignName, targetConnID)
+	} else {
+		// Unsubscribe logic
+		connID, ok := s.pairConnIndex[pair.ForeignName]
+		if !ok {
+			log.Warnf("MEXC - No connection found for pair %s to unsubscribe", pair.ForeignName)
+			return nil
+		}
+
+		lock.Lock()
+		err := s.connections[connID].wsConn.WriteMessage(ws.TextMessage, subMsg)
+		if err != nil {
+			log.Errorf("MEXC - Failed to send UNSUBSCRIPTION message for %s: %v", pair.ForeignName, err)
+			return err
+		}
+
+		s.connections[connID].numSubscriptions--
+		delete(s.pairConnIndex, pair.ForeignName)
+		log.Infof("MEXC - Unsubscribed from %s on connection %d", pair.ForeignName, connID)
 	}
 
-	s.connections[id].numSubscriptions++
-	log.Infof("MEXC - Subscribed to %s on connection %d", pair.ForeignName, id)
 	return nil
 }
 
