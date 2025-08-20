@@ -242,6 +242,36 @@ func RunScraper(
 				}
 			}
 		}
+	case MEXC_EXCHANGE:
+		ctx, cancel := context.WithCancel(context.Background())
+		scraper := NewMEXCScraper(ctx, pairs, failoverChannel, wg)
+		watchdogDelay, err := strconv.Atoi(utils.Getenv("MEXC_WATCHDOG", "300"))
+		if err != nil {
+			log.Errorf("parse MEXC_WATCHDOG: %v.", err)
+		}
+		watchdogTicker := time.NewTicker(time.Duration(watchdogDelay) * time.Second)
+		lastTradeTime := time.Now()
+
+		for {
+			select {
+			case trade := <-scraper.TradesChannel():
+				lastTradeTime = time.Now()
+				tradesChannel <- trade
+
+			case <-watchdogTicker.C:
+				duration := time.Since(lastTradeTime)
+				if duration > time.Duration(watchdogDelay)*time.Second {
+					err := scraper.Close(cancel)
+					if err != nil {
+						log.Errorf("MEXC - Close(): %v.", err)
+					}
+					log.Warnf("Closed MEXC scraper as duration since last trade is %v.", duration)
+					failoverChannel <- MEXC_EXCHANGE
+					return
+				}
+			}
+		}
+
 	case OKEX_EXCHANGE:
 		ctx, cancel := context.WithCancel(context.Background())
 		scraper := NewOKExScraper(ctx, pairs, failoverChannel, wg)
