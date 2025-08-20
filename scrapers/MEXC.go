@@ -61,21 +61,22 @@ func NewMEXCScraper(ctx context.Context, pairs []models.ExchangePair, failoverCh
 		return &scraper
 	}
 
-	// Ping connections to keep them alive.
-	for _, c := range scraper.connections {
-		go func() {
-			pingMsg := map[string]string{"method": "PING"}
-			ticker := time.NewTicker(15 * time.Second)
-			defer ticker.Stop()
-			for range ticker.C {
-				log.Infof("MEXC - Sent Ping...")
+	go func() {
+		pingMsg := map[string]string{"method": "PING"}
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			log.Infof("MEXC - Sent Ping...")
+			for _, c := range scraper.connections {
+				lock.Lock()
 				if err := c.wsConn.WriteJSON(pingMsg); err != nil {
 					log.Error("ping error: ", err)
 					return
 				}
+				lock.Unlock()
 			}
-		}()
-	}
+		}
+	}()
 
 	// Subscribe to pairs and initialize MEXCLastTradeTimeMap.
 	for _, pair := range pairs {
@@ -84,7 +85,6 @@ func NewMEXCScraper(ctx context.Context, pairs []models.ExchangePair, failoverCh
 		} else {
 			log.Debugf("MEXC - Subscribed to pair %s:%s.", MEXC_EXCHANGE, pair.ForeignName)
 			scraper.lastTradeTimeMap[pair.ForeignName] = time.Now()
-			log.Infof("MEXC - %v lastTradeTimeMap: %v", pair.ForeignName, scraper.lastTradeTimeMap[pair.ForeignName])
 		}
 	}
 
@@ -120,7 +120,7 @@ func (s *MEXCScraper) newConn(failoverChannel chan string) (*WSConnection, error
 		numSubscriptions: 0,
 	}
 	s.connections = append(s.connections, conn)
-	log.Infof("MEXC - New WS connection established. Total connections: %d", len(s.connections))
+	log.Debugf("MEXC - New WS connection established. Total connections: %d", len(s.connections))
 	return &s.connections[len(s.connections)-1], nil
 }
 
@@ -166,7 +166,7 @@ func (scraper *MEXCScraper) fetchTrades(conn WSConnection, lock *sync.RWMutex) {
 				log.Errorf("failed to parse JSON: %v", err)
 				return
 			}
-			log.Infof("Received JSON message: %+v", msg["msg"])
+			log.Debugf("Received JSON message: %+v", msg["msg"])
 
 		default:
 			decodedMessage := &mexcproto.PushDataV3ApiWrapper{}
@@ -219,10 +219,9 @@ func (scraper *MEXCScraper) handleWSResponse(message *mexcproto.PublicAggreDeals
 		trade.QuoteToken = scraper.tickerPairMap[pair].QuoteToken
 		trade.BaseToken = scraper.tickerPairMap[pair].BaseToken
 
-		log.Infof("MEXC - got trade: %s -- %v -- %v -- %s -- %v.", trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol, trade.Price, trade.Volume, trade.ForeignTradeID, trade.Time)
+		log.Tracef("MEXC - got trade: %s -- %v -- %v -- %s -- %v.", trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol, trade.Price, trade.Volume, trade.ForeignTradeID, trade.Time)
 		lock.Lock()
 		scraper.lastTradeTimeMap[trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol] = trade.Time
-		log.Infof("MEXC - %v lastTradeTimeMap now: %v", trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol, scraper.lastTradeTimeMap[trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol])
 		lock.Unlock()
 		scraper.tradesChannel <- trade
 	}
@@ -230,7 +229,6 @@ func (scraper *MEXCScraper) handleWSResponse(message *mexcproto.PublicAggreDeals
 }
 
 func (s *MEXCScraper) resubscribe(ctx context.Context, failoverChannel chan string, lock *sync.RWMutex) {
-	log.Warnf("MEXC - resubscribe loop started")
 	for {
 		select {
 		case pair := <-s.subscribeChannel:
@@ -257,8 +255,6 @@ func (s *MEXCScraper) subscribe(pair models.ExchangePair, subscribe bool, failov
 
 	foreignName := strings.ReplaceAll(pair.ForeignName, "-", "")
 	topic := "spot@public.aggre.deals.v3.api.pb@100ms@" + foreignName
-
-	log.Infof("MEXC - subscribe to %s", topic)
 
 	subscriptionMessage := map[string]interface{}{
 		"method": "UNSUBSCRIPTION",
@@ -298,7 +294,7 @@ func (s *MEXCScraper) subscribe(pair models.ExchangePair, subscribe bool, failov
 
 		s.connections[targetConnID].numSubscriptions++
 		s.pairConnIndex[pair.ForeignName] = targetConnID
-		log.Infof("MEXC - Subscribed to %s on connection %d", pair.ForeignName, targetConnID)
+		log.Debugf("MEXC - Subscribed to %s on connection %d", pair.ForeignName, targetConnID)
 	} else {
 		// Unsubscribe logic
 		connID, ok := s.pairConnIndex[pair.ForeignName]
