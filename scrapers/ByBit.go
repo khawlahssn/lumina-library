@@ -215,7 +215,7 @@ func (scraper *byBitScraper) handleMessage(message []byte, lock *sync.RWMutex) {
 		lock.Unlock()
 
 		scraper.tradesChannel <- trade
-		log.Infof("ByBit - Trade: %s-%s | Side: %v | Price: %f | Volume: %f", pair.QuoteToken.Symbol, pair.BaseToken.Symbol, side, price, volume)
+		log.Tracef("ByBit - Trade: %s-%s | Side: %v | Price: %f | Volume: %f", pair.QuoteToken.Symbol, pair.BaseToken.Symbol, side, price, volume)
 	}
 }
 

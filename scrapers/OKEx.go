@@ -197,7 +197,7 @@ func (scraper *OKExScraper) handleWSResponse(data OKEXDATA, lock *sync.RWMutex) 
 		trade.QuoteToken = scraper.tickerPairMap[pair[0]+pair[1]].QuoteToken
 		trade.BaseToken = scraper.tickerPairMap[pair[0]+pair[1]].BaseToken
 
-		log.Infof("OKEx - got trade: %s -- %v -- %v -- %s -- %s.", trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol, trade.Price, trade.Volume, trade.ForeignTradeID, trade.Time)
+		log.Tracef("OKEx - got trade: %s -- %v -- %v -- %s -- %s.", trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol, trade.Price, trade.Volume, trade.ForeignTradeID, trade.Time)
 		lock.Lock()
 		scraper.lastTradeTimeMap[pair[0]+"-"+pair[1]] = trade.Time
 		lock.Unlock()
