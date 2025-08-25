@@ -31,6 +31,7 @@ type MEXCScraper struct {
 	genesis          time.Time
 	maxSubscriptions int
 	pairConnIndex    map[string]int
+	mu               sync.RWMutex
 }
 
 var (
@@ -54,6 +55,7 @@ func NewMEXCScraper(ctx context.Context, pairs []models.ExchangePair, failoverCh
 		maxSubscriptions: maxSubscriptionPerConn,
 		connections:      make([]WSConnection, 0),
 		pairConnIndex:    make(map[string]int),
+		mu:               sync.RWMutex{},
 	}
 
 	if _, err := scraper.newConn(failoverChannel); err != nil {
@@ -68,19 +70,19 @@ func NewMEXCScraper(ctx context.Context, pairs []models.ExchangePair, failoverCh
 		for range ticker.C {
 			log.Infof("MEXC - Sent Ping...")
 			for _, c := range scraper.connections {
-				lock.Lock()
+				scraper.mu.Lock()
 				if err := c.wsConn.WriteJSON(pingMsg); err != nil {
 					log.Error("ping error: ", err)
 					return
 				}
-				lock.Unlock()
+				scraper.mu.Unlock()
 			}
 		}
 	}()
 
 	// Subscribe to pairs and initialize MEXCLastTradeTimeMap.
 	for _, pair := range pairs {
-		if err := scraper.subscribe(pair, true, failoverChannel, &lock); err != nil {
+		if err := scraper.subscribe(pair, true, failoverChannel); err != nil {
 			log.Errorf("MEXC - subscribe to pair %s: %v.", pair.ForeignName, err)
 		} else {
 			log.Debugf("MEXC - Subscribed to pair %s:%s.", MEXC_EXCHANGE, pair.ForeignName)
@@ -89,7 +91,7 @@ func NewMEXCScraper(ctx context.Context, pairs []models.ExchangePair, failoverCh
 	}
 
 	for _, conn := range scraper.connections {
-		go scraper.fetchTrades(conn, &lock)
+		go scraper.fetchTrades(conn)
 	}
 
 	// Check last trade time for each subscribed pair and resubscribe if no activity for more than @MEXCWatchdogDelayMap.
@@ -101,7 +103,7 @@ func NewMEXCScraper(ctx context.Context, pairs []models.ExchangePair, failoverCh
 		}
 		watchdogTicker := time.NewTicker(time.Duration(watchdogDelay) * time.Second)
 		go watchdog(ctx, pair, watchdogTicker, scraper.lastTradeTimeMap, watchdogDelay, scraper.subscribeChannel, &lock)
-		go scraper.resubscribe(ctx, failoverChannel, &lock)
+		go scraper.resubscribe(ctx, failoverChannel)
 	}
 
 	return &scraper
@@ -119,6 +121,8 @@ func (s *MEXCScraper) newConn(failoverChannel chan string) (*WSConnection, error
 		wsConn:           wsClient,
 		numSubscriptions: 0,
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.connections = append(s.connections, conn)
 	log.Debugf("MEXC - New WS connection established. Total connections: %d", len(s.connections))
 	return &s.connections[len(s.connections)-1], nil
@@ -146,7 +150,7 @@ func (scraper *MEXCScraper) TradesChannel() chan models.Trade {
 	return scraper.tradesChannel
 }
 
-func (scraper *MEXCScraper) fetchTrades(conn WSConnection, lock *sync.RWMutex) {
+func (scraper *MEXCScraper) fetchTrades(conn WSConnection) {
 	// Read trades stream.
 	var errCount int
 
@@ -197,7 +201,7 @@ func (scraper *MEXCScraper) fetchTrades(conn WSConnection, lock *sync.RWMutex) {
 					break
 				}
 				for idx, trade := range dealsMsg.GetDeals() {
-					scraper.handleWSResponse(trade, sym, tradeID+int64(idx), lock)
+					scraper.handleWSResponse(trade, sym, tradeID+int64(idx))
 				}
 			default:
 				// handle other channels if you subscribe to them later
@@ -207,7 +211,7 @@ func (scraper *MEXCScraper) fetchTrades(conn WSConnection, lock *sync.RWMutex) {
 	}
 }
 
-func (scraper *MEXCScraper) handleWSResponse(message *mexcproto.PublicAggreDealsV3ApiItem, pair string, tradeID int64, lock *sync.RWMutex) {
+func (scraper *MEXCScraper) handleWSResponse(message *mexcproto.PublicAggreDealsV3ApiItem, pair string, tradeID int64) {
 	trade, err := MEXCParseTradeMessage(message, tradeID)
 	if err != nil {
 		log.Errorf("MEXC - parseMEXCTradeMessage: %s.", err.Error())
@@ -220,25 +224,25 @@ func (scraper *MEXCScraper) handleWSResponse(message *mexcproto.PublicAggreDeals
 		trade.BaseToken = scraper.tickerPairMap[pair].BaseToken
 
 		log.Tracef("MEXC - got trade: %s -- %v -- %v -- %s -- %v.", trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol, trade.Price, trade.Volume, trade.ForeignTradeID, trade.Time)
-		lock.Lock()
+		scraper.mu.Lock()
 		scraper.lastTradeTimeMap[trade.QuoteToken.Symbol+"-"+trade.BaseToken.Symbol] = trade.Time
-		lock.Unlock()
+		scraper.mu.Unlock()
 		scraper.tradesChannel <- trade
 	}
 
 }
 
-func (s *MEXCScraper) resubscribe(ctx context.Context, failoverChannel chan string, lock *sync.RWMutex) {
+func (s *MEXCScraper) resubscribe(ctx context.Context, failoverChannel chan string) {
 	for {
 		select {
 		case pair := <-s.subscribeChannel:
-			err := s.subscribe(pair, false, failoverChannel, lock) // unsubscribe first
+			err := s.subscribe(pair, false, failoverChannel) // unsubscribe first
 			if err != nil {
 				log.Errorf("MEXC - Unsubscribe failed for %s: %v", pair.ForeignName, err)
 			}
 			time.Sleep(2 * time.Second)
 
-			err = s.subscribe(pair, true, failoverChannel, lock)
+			err = s.subscribe(pair, true, failoverChannel)
 			if err != nil {
 				log.Errorf("MEXC - Resubscribe failed for %s: %v", pair.ForeignName, err)
 			}
@@ -250,9 +254,7 @@ func (s *MEXCScraper) resubscribe(ctx context.Context, failoverChannel chan stri
 	}
 }
 
-func (s *MEXCScraper) subscribe(pair models.ExchangePair, subscribe bool, failoverChannel chan string, lock *sync.RWMutex) error {
-	defer lock.Unlock()
-
+func (s *MEXCScraper) subscribe(pair models.ExchangePair, subscribe bool, failoverChannel chan string) error {
 	foreignName := strings.ReplaceAll(pair.ForeignName, "-", "")
 	topic := "spot@public.aggre.deals.v3.api.pb@100ms@" + foreignName
 
@@ -285,7 +287,7 @@ func (s *MEXCScraper) subscribe(pair models.ExchangePair, subscribe bool, failov
 			targetConnID = len(s.connections) - 1
 		}
 
-		lock.Lock()
+		s.mu.Lock()
 		err := s.connections[targetConnID].wsConn.WriteMessage(ws.TextMessage, subMsg)
 		if err != nil {
 			log.Errorf("MEXC - Failed to send SUBSCRIPTION message for %s: %v", pair.ForeignName, err)
@@ -293,17 +295,22 @@ func (s *MEXCScraper) subscribe(pair models.ExchangePair, subscribe bool, failov
 		}
 
 		s.connections[targetConnID].numSubscriptions++
+		s.mu.Unlock()
+		s.mu.Lock()
 		s.pairConnIndex[pair.ForeignName] = targetConnID
+		s.mu.Unlock()
 		log.Debugf("MEXC - Subscribed to %s on connection %d", pair.ForeignName, targetConnID)
 	} else {
 		// Unsubscribe logic
+		s.mu.Lock()
 		connID, ok := s.pairConnIndex[pair.ForeignName]
+		s.mu.Unlock()
 		if !ok {
 			log.Warnf("MEXC - No connection found for pair %s to unsubscribe", pair.ForeignName)
 			return nil
 		}
 
-		lock.Lock()
+		s.mu.Lock()
 		err := s.connections[connID].wsConn.WriteMessage(ws.TextMessage, subMsg)
 		if err != nil {
 			log.Errorf("MEXC - Failed to send UNSUBSCRIPTION message for %s: %v", pair.ForeignName, err)
@@ -312,6 +319,7 @@ func (s *MEXCScraper) subscribe(pair models.ExchangePair, subscribe bool, failov
 
 		s.connections[connID].numSubscriptions--
 		delete(s.pairConnIndex, pair.ForeignName)
+		s.mu.Unlock()
 		log.Infof("MEXC - Unsubscribed from %s on connection %d", pair.ForeignName, connID)
 	}
 
