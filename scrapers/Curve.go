@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/diadata-org/lumina-library/contracts/curve/curvefactory"
-	"github.com/diadata-org/lumina-library/contracts/curve/curvefi"
 	"github.com/diadata-org/lumina-library/contracts/curve/curvefifactory"
 	curvefitwocryptooptimized "github.com/diadata-org/lumina-library/contracts/curve/curvefitwocrypto"
 	"github.com/diadata-org/lumina-library/contracts/curve/curvepool"
@@ -23,16 +21,11 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 )
 
+const NativeETHSentinel = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+
 var (
-	restDialCurve     = ""
-	wsDialCurve       = ""
-	registryAddresses = map[string]string{
-		"base":       "0x90E00ACe148ca3b23Ac1bC8C240C2a7Dd9c2d7f5",
-		"factory":    "0xF18056Bbd320E96A48e3Fbf8bC061322531aac99",
-		"cryptoswap": "0x8F942C20D02bEfc377D41445793068908E2250D0",
-		"meta":       "0xB9fC157394Af804a3578134A6585C0dc9cc990d4",
-		"factory2":   "0x4F8846Ae9380B90d2E71D5e3D042dff3E7ebb40d",
-	}
+	restDialCurve = ""
+	wsDialCurve   = ""
 )
 
 type CurvePair struct {
@@ -54,7 +47,7 @@ type CurveSwap struct {
 
 type CurveScraper struct {
 	exchange         models.Exchange
-	poolMap          map[common.Address]CurvePair
+	poolMap          map[common.Address][]CurvePair
 	subscribeChannel chan common.Address
 	lastTradeTimeMap map[common.Address]time.Time
 	restClient       *ethclient.Client
@@ -85,7 +78,9 @@ func NewCurveScraper(ctx context.Context, exchangeName string, blockchain string
 		log.Error("Curve - init ws client: ", err)
 	}
 
-	scraper.makePoolMap(pools)
+	if err := scraper.makePoolMap(pools); err != nil {
+		log.Fatalf("Curve - makePoolMap failed: %v", err)
+	}
 
 	var lock sync.RWMutex
 	go scraper.mainLoop(ctx, pools, tradesChannel, &lock)
@@ -93,9 +88,16 @@ func NewCurveScraper(ctx context.Context, exchangeName string, blockchain string
 
 func (scraper *CurveScraper) mainLoop(ctx context.Context, pools []models.Pool, tradesChannel chan models.Trade, lock *sync.RWMutex) {
 	var wg sync.WaitGroup
+	seen := make(map[common.Address]bool) // to avoid duplicate pools
 	for _, pool := range pools {
+		addr := common.HexToAddress(pool.Address)
+		if seen[addr] {
+			continue
+		}
+		seen[addr] = true
+
 		lock.Lock()
-		scraper.lastTradeTimeMap[common.HexToAddress(pool.Address)] = time.Now()
+		scraper.lastTradeTimeMap[addr] = time.Now()
 		lock.Unlock()
 
 		envVar := strings.ToUpper(scraper.exchange.Name) + "_WATCHDOG_" + pool.Address
@@ -104,15 +106,16 @@ func (scraper *CurveScraper) mainLoop(ctx context.Context, pools []models.Pool, 
 			log.Errorf("Curve - Parse curveWatchdogDelay: %v.", err)
 		}
 		watchdogTicker := time.NewTicker(time.Duration(watchdogDelay) * time.Second)
-		go watchdogPool(ctx, scraper.exchange.Name, common.HexToAddress(pool.Address), watchdogTicker, scraper.lastTradeTimeMap, watchdogDelay, scraper.subscribeChannel, lock)
+		go watchdogPool(ctx, scraper.exchange.Name, addr, watchdogTicker, scraper.lastTradeTimeMap, watchdogDelay, scraper.subscribeChannel, lock)
 
 		time.Sleep(time.Duration(scraper.waitTime) * time.Millisecond)
 		wg.Add(1)
 		go func(ctx context.Context, address common.Address, w *sync.WaitGroup, lock *sync.RWMutex) {
 			defer w.Done()
 			scraper.watchSwaps(ctx, address, tradesChannel, lock)
-		}(ctx, common.HexToAddress(pool.Address), &wg, lock)
+		}(ctx, addr, &wg, lock)
 	}
+	active := seen
 	go func() {
 		for {
 			select {
@@ -120,11 +123,14 @@ func (scraper *CurveScraper) mainLoop(ctx context.Context, pools []models.Pool, 
 				log.Infof("Resubscribing to pool: %s", addr.Hex())
 
 				lock.Lock()
-				scraper.lastTradeTimeMap[addr] = time.Now()
+				if !active[addr] {
+					active[addr] = true
+					scraper.lastTradeTimeMap[addr] = time.Now()
+					go scraper.watchSwaps(ctx, addr, tradesChannel, lock)
+				} else {
+					log.Infof("Pool %s already active, skipping resubscription", addr.Hex())
+				}
 				lock.Unlock()
-
-				go scraper.watchSwaps(ctx, addr, tradesChannel, lock)
-
 			case <-ctx.Done():
 				log.Info("Stopping resubscription handler.")
 				return
@@ -165,7 +171,7 @@ func makeCurveTrade(
 }
 
 func parseIndexCode(code int) (outIdx, inIdx int, err error) {
-	s := strconv.Itoa(code)
+	s := fmt.Sprintf("%02d", code)
 	if len(s) != 2 {
 		return 0, 0, fmt.Errorf("index code must be 2 digits, got: %s", s)
 	}
@@ -178,9 +184,16 @@ func parseIndexCode(code int) (outIdx, inIdx int, err error) {
 	return
 }
 
-func (scraper *CurveScraper) watchSwaps(ctx context.Context, address common.Address, tradesChannel chan models.Trade, lock *sync.RWMutex) {
-	pair := scraper.poolMap[address]
+func findPairByIdx(pairs []CurvePair, soldID int, boughtID int) (CurvePair, bool) {
+	for _, pair := range pairs {
+		if pair.InIndex == soldID && pair.OutIndex == boughtID {
+			return pair, true
+		}
+	}
+	return CurvePair{}, false
+}
 
+func (scraper *CurveScraper) watchSwaps(ctx context.Context, address common.Address, tradesChannel chan models.Trade, lock *sync.RWMutex) {
 	feeds, err := scraper.GetSwapsChannel(address)
 	if err != nil {
 		log.Error("Curve - failed to get swaps channel: ", err)
@@ -189,43 +202,190 @@ func (scraper *CurveScraper) watchSwaps(ctx context.Context, address common.Addr
 	log.Infof("Curve - subscribed to pool: %s", address.Hex())
 
 	go func() {
+		defer func() {
+			if feeds.Sub != nil {
+				feeds.Sub.Unsubscribe()
+			}
+			if feeds.factorySub != nil {
+				feeds.factorySub.Unsubscribe()
+			}
+			if feeds.twoSub != nil {
+				feeds.twoSub.Unsubscribe()
+			}
+			if feeds.underlyingSub != nil {
+				feeds.underlyingSub.Unsubscribe()
+			}
+		}()
 		for {
 			select {
 			case rawSwap, ok := <-feeds.Sink:
 				if ok {
-					log.Infof("Curve - received swap: %v", rawSwap)
-					swap, err := scraper.normalizeCurveSwap(*rawSwap)
+					log.Infof("Curve - received swap from sink: %v", rawSwap)
+					swap, err := scraper.extractSwapData(*rawSwap)
 					if err != nil {
 						log.Error("Curve - error normalizing swap: ", err)
+						continue
 					}
-					scraper.processSwap(swap, pair, address, lock, tradesChannel)
+					log.Warnf("poolMap: %v", scraper.poolMap)
+					pairs := scraper.poolMap[swap.addr]
+					if len(pairs) == 0 {
+						log.Errorf("Curve - no pairs found for address %s", swap.addr.Hex())
+						continue
+					}
+					pair, ok := findPairByIdx(pairs, swap.soldID, swap.boughtID)
+					if !ok {
+						log.Errorf("Curve - no pair found for address %s", swap.addr.Hex())
+						continue
+					}
+					var decSold, decBought int
+					switch swap.soldID {
+					case pair.InIndex:
+						decSold = int(pair.InAsset.Decimals)
+					case pair.OutIndex:
+						decSold = int(pair.OutAsset.Decimals)
+					}
+					switch swap.boughtID {
+					case pair.OutIndex:
+						decBought = int(pair.OutAsset.Decimals)
+					case pair.InIndex:
+						decBought = int(pair.InAsset.Decimals)
+					}
+					soldAmt, _ := new(big.Float).Quo(new(big.Float).SetInt(swap.sold), new(big.Float).SetFloat64(math.Pow10(decSold))).Float64()
+					boughtAmt, _ := new(big.Float).Quo(new(big.Float).SetInt(swap.bought), new(big.Float).SetFloat64(math.Pow10(decBought))).Float64()
+					normalizedSwap := CurveSwap{
+						ID:        swap.swapID,
+						Timestamp: time.Now().Unix(),
+						Pair:      pair,
+						Amount0:   soldAmt,
+						Amount1:   boughtAmt,
+					}
+					scraper.processSwap(normalizedSwap, pairs, address, lock, tradesChannel)
 				}
 			case rawSwapCurvefiFactory, ok := <-feeds.factorySink:
 				if ok {
-					log.Infof("Curve - received swap: %v", rawSwapCurvefiFactory)
-					swap, err := scraper.normalizeCurveSwap(*rawSwapCurvefiFactory)
+					log.Infof("Curve - received swap from factory sink: %v", rawSwapCurvefiFactory)
+					swap, err := scraper.extractSwapData(*rawSwapCurvefiFactory)
 					if err != nil {
 						log.Error("Curve - error normalizing swap: ", err)
+						continue
 					}
-					scraper.processSwap(swap, pair, address, lock, tradesChannel)
+					pairs := scraper.poolMap[swap.addr]
+					if len(pairs) == 0 {
+						log.Errorf("Curve - no pairs found for address %s", swap.addr.Hex())
+						continue
+					}
+					pair, ok := findPairByIdx(pairs, swap.soldID, swap.boughtID)
+					if !ok {
+						log.Errorf("Curve - no pair found for address %s", swap.addr.Hex())
+						continue
+					}
+					var decSold, decBought int
+					switch swap.soldID {
+					case pair.InIndex:
+						decSold = int(pair.InAsset.Decimals)
+					case pair.OutIndex:
+						decSold = int(pair.OutAsset.Decimals)
+					}
+					switch swap.boughtID {
+					case pair.OutIndex:
+						decBought = int(pair.OutAsset.Decimals)
+					case pair.InIndex:
+						decBought = int(pair.InAsset.Decimals)
+					}
+					soldAmt, _ := new(big.Float).Quo(new(big.Float).SetInt(swap.sold), new(big.Float).SetFloat64(math.Pow10(decSold))).Float64()
+					boughtAmt, _ := new(big.Float).Quo(new(big.Float).SetInt(swap.bought), new(big.Float).SetFloat64(math.Pow10(decBought))).Float64()
+					normalizedSwap := CurveSwap{
+						ID:        swap.swapID,
+						Timestamp: time.Now().Unix(),
+						Pair:      pair,
+						Amount0:   soldAmt,
+						Amount1:   boughtAmt,
+					}
+					scraper.processSwap(normalizedSwap, pairs, address, lock, tradesChannel)
 				}
 			case rawSwapTwoCrypto, ok := <-feeds.twoSink:
 				if ok {
-					log.Infof("Curve - received swap: %v", rawSwapTwoCrypto)
-					swap, err := scraper.normalizeCurveSwap(*rawSwapTwoCrypto)
+					log.Infof("Curve - received swap from two crypto sink: %v", rawSwapTwoCrypto)
+					swap, err := scraper.extractSwapData(*rawSwapTwoCrypto)
 					if err != nil {
 						log.Error("Curve - error normalizing swap: ", err)
+						continue
 					}
-					scraper.processSwap(swap, pair, address, lock, tradesChannel)
+					pairs := scraper.poolMap[swap.addr]
+					if len(pairs) == 0 {
+						log.Errorf("Curve - no pairs found for address %s", swap.addr.Hex())
+						continue
+					}
+					pair, ok := findPairByIdx(pairs, swap.soldID, swap.boughtID)
+					if !ok {
+						log.Errorf("Curve - no pair found for address %s", swap.addr.Hex())
+						continue
+					}
+					var decSold, decBought int
+					switch swap.soldID {
+					case pair.InIndex:
+						decSold = int(pair.InAsset.Decimals)
+					case pair.OutIndex:
+						decSold = int(pair.OutAsset.Decimals)
+					}
+					switch swap.boughtID {
+					case pair.OutIndex:
+						decBought = int(pair.OutAsset.Decimals)
+					case pair.InIndex:
+						decBought = int(pair.InAsset.Decimals)
+					}
+					soldAmt, _ := new(big.Float).Quo(new(big.Float).SetInt(swap.sold), new(big.Float).SetFloat64(math.Pow10(decSold))).Float64()
+					boughtAmt, _ := new(big.Float).Quo(new(big.Float).SetInt(swap.bought), new(big.Float).SetFloat64(math.Pow10(decBought))).Float64()
+					normalizedSwap := CurveSwap{
+						ID:        swap.swapID,
+						Timestamp: time.Now().Unix(),
+						Pair:      pair,
+						Amount0:   soldAmt,
+						Amount1:   boughtAmt,
+					}
+					scraper.processSwap(normalizedSwap, pairs, address, lock, tradesChannel)
 				}
 			case rawSwapUnderlying, ok := <-feeds.underlyingSink:
 				if ok {
-					log.Infof("Curve - received swap: %v", rawSwapUnderlying)
-					swap, err := scraper.normalizeCurveSwap(*rawSwapUnderlying)
+					log.Infof("Curve - received swap from underlying sink: %v", rawSwapUnderlying)
+					swap, err := scraper.extractSwapData(*rawSwapUnderlying)
 					if err != nil {
 						log.Error("Curve - error normalizing swap: ", err)
+						continue
 					}
-					scraper.processSwap(swap, pair, address, lock, tradesChannel)
+					pairs := scraper.poolMap[swap.addr]
+					if len(pairs) == 0 {
+						log.Errorf("Curve - no pairs found for address %s", swap.addr.Hex())
+						continue
+					}
+					pair, ok := findPairByIdx(pairs, swap.soldID, swap.boughtID)
+					if !ok {
+						log.Errorf("Curve - no pair found for address %s", swap.addr.Hex())
+						continue
+					}
+					var decSold, decBought int
+					switch swap.soldID {
+					case pair.InIndex:
+						decSold = int(pair.InAsset.Decimals)
+					case pair.OutIndex:
+						decSold = int(pair.OutAsset.Decimals)
+					}
+					switch swap.boughtID {
+					case pair.OutIndex:
+						decBought = int(pair.OutAsset.Decimals)
+					case pair.InIndex:
+						decBought = int(pair.InAsset.Decimals)
+					}
+					soldAmt, _ := new(big.Float).Quo(new(big.Float).SetInt(swap.sold), new(big.Float).SetFloat64(math.Pow10(decSold))).Float64()
+					boughtAmt, _ := new(big.Float).Quo(new(big.Float).SetInt(swap.bought), new(big.Float).SetFloat64(math.Pow10(decBought))).Float64()
+					normalizedSwap := CurveSwap{
+						ID:        swap.swapID,
+						Timestamp: time.Now().Unix(),
+						Pair:      pair,
+						Amount0:   soldAmt,
+						Amount1:   boughtAmt,
+					}
+					scraper.processSwap(normalizedSwap, pairs, address, lock, tradesChannel)
 				}
 			case err := <-feeds.Sub.Err():
 				log.Errorf("Subscription error for pool %s: %v", address.Hex(), err)
@@ -251,72 +411,74 @@ func (scraper *CurveScraper) watchSwaps(ctx context.Context, address common.Addr
 	}()
 }
 
-func (scraper *CurveScraper) processSwap(swap CurveSwap, pair CurvePair, address common.Address, lock *sync.RWMutex, tradesChannel chan models.Trade) {
-	price, volume := getSwapDataCurve(swap)
-	t := makeCurveTrade(pair, price, volume, time.Unix(swap.Timestamp, 0), address, swap.ID, scraper.exchange.Name, scraper.exchange.Blockchain)
+func (scraper *CurveScraper) processSwap(swap CurveSwap, pairs []CurvePair, address common.Address, lock *sync.RWMutex, tradesChannel chan models.Trade) {
+	for _, pair := range pairs {
+		// only do InIndex -> OutIndex direction
+		if swap.Pair.InIndex == pair.InIndex && swap.Pair.OutIndex == pair.OutIndex {
+			price, volume := getSwapDataCurve(swap)
+			t := makeCurveTrade(pair, price, volume, time.Unix(swap.Timestamp, 0), address, swap.ID, scraper.exchange.Name, scraper.exchange.Blockchain)
 
-	// Update lastTradeTimeMap
-	lock.Lock()
-	scraper.lastTradeTimeMap[address] = t.Time
-	lock.Unlock()
+			// Update lastTradeTimeMap
+			lock.Lock()
+			scraper.lastTradeTimeMap[address] = t.Time
+			lock.Unlock()
 
-	tradesChannel <- t
-	logTrade(t)
+			tradesChannel <- t
+			logTrade(t)
+		}
+	}
 }
 
-func (scraper *CurveScraper) normalizeCurveSwap(swap interface{}) (CurveSwap, error) {
-	var pair CurvePair
-	var amount0 float64
-	var amount1 float64
-	var swapId string
+type rawSwapData struct {
+	addr     common.Address
+	soldID   int
+	boughtID int
+	sold     *big.Int
+	bought   *big.Int
+	swapID   string
+}
 
-	switch s := swap.(type) {
+func (scraper *CurveScraper) extractSwapData(ev interface{}) (rawSwapData, error) {
+	switch s := ev.(type) {
 	case curvepool.CurvepoolTokenExchange:
-		pair := scraper.poolMap[s.Raw.Address]
-		decimals0 := int(pair.OutAsset.Decimals)
-		decimals1 := int(pair.InAsset.Decimals)
-		swapId = s.Raw.TxHash.Hex()
-
-		amount0, _ = new(big.Float).Quo(big.NewFloat(0).SetInt(s.TokensSold), new(big.Float).SetFloat64(math.Pow10(decimals0))).Float64()
-		amount1, _ = new(big.Float).Quo(big.NewFloat(0).SetInt(s.TokensBought), new(big.Float).SetFloat64(math.Pow10(decimals1))).Float64()
-
+		return rawSwapData{
+			addr:     s.Raw.Address,
+			soldID:   int(s.SoldId.Int64()),
+			boughtID: int(s.BoughtId.Int64()),
+			sold:     s.TokensSold,
+			bought:   s.TokensBought,
+			swapID:   s.Raw.TxHash.Hex(),
+		}, nil
 	case curvefifactory.CurvefifactoryTokenExchange:
-		pair := scraper.poolMap[s.Raw.Address]
-		decimals0 := int(pair.OutAsset.Decimals)
-		decimals1 := int(pair.InAsset.Decimals)
-		swapId = s.Raw.TxHash.Hex()
-
-		amount0, _ = new(big.Float).Quo(big.NewFloat(0).SetInt(s.TokensSold), new(big.Float).SetFloat64(math.Pow10(decimals0))).Float64()
-		amount1, _ = new(big.Float).Quo(big.NewFloat(0).SetInt(s.TokensBought), new(big.Float).SetFloat64(math.Pow10(decimals1))).Float64()
-
+		return rawSwapData{
+			addr:     s.Raw.Address,
+			soldID:   int(s.SoldId.Int64()),
+			boughtID: int(s.BoughtId.Int64()),
+			sold:     s.TokensSold,
+			bought:   s.TokensBought,
+			swapID:   s.Raw.TxHash.Hex(),
+		}, nil
 	case curvefitwocryptooptimized.CurvefitwocryptooptimizedTokenExchange:
-		pair := scraper.poolMap[s.Raw.Address]
-		decimals0 := int(pair.OutAsset.Decimals)
-		decimals1 := int(pair.InAsset.Decimals)
-		swapId = s.Raw.TxHash.Hex()
-
-		amount0, _ = new(big.Float).Quo(big.NewFloat(0).SetInt(s.TokensSold), new(big.Float).SetFloat64(math.Pow10(decimals0))).Float64()
-		amount1, _ = new(big.Float).Quo(big.NewFloat(0).SetInt(s.TokensBought), new(big.Float).SetFloat64(math.Pow10(decimals1))).Float64()
-
+		return rawSwapData{
+			addr:     s.Raw.Address,
+			soldID:   int(s.SoldId.Int64()),
+			boughtID: int(s.BoughtId.Int64()),
+			sold:     s.TokensSold,
+			bought:   s.TokensBought,
+			swapID:   s.Raw.TxHash.Hex(),
+		}, nil
 	case curvepool.CurvepoolTokenExchangeUnderlying:
-		pair := scraper.poolMap[s.Raw.Address]
-		decimals0 := int(pair.OutAsset.Decimals)
-		decimals1 := int(pair.InAsset.Decimals)
-		swapId = s.Raw.TxHash.Hex()
-
-		amount0, _ = new(big.Float).Quo(big.NewFloat(0).SetInt(s.TokensSold), new(big.Float).SetFloat64(math.Pow10(decimals0))).Float64()
-		amount1, _ = new(big.Float).Quo(big.NewFloat(0).SetInt(s.TokensBought), new(big.Float).SetFloat64(math.Pow10(decimals1))).Float64()
-
+		return rawSwapData{
+			addr:     s.Raw.Address,
+			soldID:   int(s.SoldId.Int64()),
+			boughtID: int(s.BoughtId.Int64()),
+			sold:     s.TokensSold,
+			bought:   s.TokensBought,
+			swapID:   s.Raw.TxHash.Hex(),
+		}, nil
+	default:
+		return rawSwapData{}, fmt.Errorf("unknown swap type")
 	}
-	normalizedSwap := CurveSwap{
-		ID:        swapId,
-		Timestamp: time.Now().Unix(),
-		Pair:      pair,
-		Amount0:   amount0,
-		Amount1:   amount1,
-	}
-
-	return normalizedSwap, nil
 }
 
 type curveFeeds struct {
@@ -358,10 +520,10 @@ func (scraper *CurveScraper) GetSwapsChannel(address common.Address) (*curveFeed
 	startblock := header.Number.Uint64() - uint64(20)
 
 	feeds := &curveFeeds{
-		Sink:           make(chan *curvepool.CurvepoolTokenExchange),
-		factorySink:    make(chan *curvefifactory.CurvefifactoryTokenExchange),
-		twoSink:        make(chan *curvefitwocryptooptimized.CurvefitwocryptooptimizedTokenExchange),
-		underlyingSink: make(chan *curvepool.CurvepoolTokenExchangeUnderlying),
+		Sink:           sink,
+		factorySink:    sinkCurvefiFactory,
+		twoSink:        sinkTwoCrypto,
+		underlyingSink: sinkUnderlying,
 	}
 
 	sub, err := filterer.WatchTokenExchange(&bind.WatchOpts{Start: &startblock}, sink, nil)
@@ -391,87 +553,107 @@ func (scraper *CurveScraper) GetSwapsChannel(address common.Address) (*curveFeed
 	return feeds, nil
 }
 
-func (scraper *CurveScraper) makePoolMap(pools []models.Pool) error {
-	scraper.poolMap = make(map[common.Address]CurvePair)
-	var assetMap = make(map[common.Address]models.Asset)
+// try to get coin address from pool contract
+func coinAddressFromPool(ctx context.Context, client *ethclient.Client, pool common.Address, idx int) (common.Address, error) {
+	bi := big.NewInt(int64(idx))
 
-	var registry interface{}
-	var err error
-
-	registry, err = curvefi.NewCurvefi(common.HexToAddress(registryAddresses["base"]), scraper.restClient)
-	if err == nil {
-		log.Infof("Curve - created curvefi instance")
-	} else {
-		registry, err = curvefactory.NewCurvefactory(common.HexToAddress(registryAddresses["factory"]), scraper.restClient)
-		if err != nil {
-			log.Errorf("Curve - failed to create registry instance: %v", err)
-			return err
-		} else {
-			log.Infof("Curve - created curvefactory instance: factory")
+	// 1) start with curvepool which is the most common pool
+	if c, err := curvepool.NewCurvepool(pool, client); err == nil {
+		// try coins(idx)
+		if addr, err := c.Coins(&bind.CallOpts{Context: ctx}, bi); err == nil && addr != (common.Address{}) {
+			return addr, nil
+		}
+		// try underlying_coins(idx)
+		if addr, err := c.UnderlyingCoins(&bind.CallOpts{Context: ctx}, bi); err == nil && addr != (common.Address{}) {
+			return addr, nil
 		}
 	}
+
+	// 2) TwoCrypto optimized pool (like 2pool/cryptoswap)
+	if c2, err := curvefitwocryptooptimized.NewCurvefitwocryptooptimized(pool, client); err == nil {
+		if addr, err := c2.Coins(&bind.CallOpts{Context: ctx}, bi); err == nil && addr != (common.Address{}) {
+			return addr, nil
+		}
+		// TwoCrypto usually doesn't have underlying_coins
+	}
+
+	return common.Address{}, fmt.Errorf("cannot resolve coin at index %d for pool %s", idx, pool.Hex())
+}
+
+func (scraper *CurveScraper) makePoolMap(pools []models.Pool) error {
+	scraper.poolMap = make(map[common.Address][]CurvePair)
+	var assetMap = make(map[common.Address]models.Asset)
+
+	ctx := context.Background()
 
 	for _, pool := range pools {
 		outIdx, inIdx, err := parseIndexCode(pool.Order)
 		if err != nil {
 			log.Error("Curve - failed to parse index code: ", err)
-			return err
+			continue
 		}
-		var coins []common.Address
-		switch r := registry.(type) {
-		case *curvefi.Curvefi:
-			coins_curvefi, err_curvefi := r.GetCoins(&bind.CallOpts{Context: context.Background()}, common.HexToAddress(pool.Address))
-			if err_curvefi != nil {
-				coins_curvefi, err_curvefi = r.GetUnderlyingCoins(&bind.CallOpts{Context: context.Background()}, common.HexToAddress(pool.Address))
-				if err_curvefi != nil {
-					log.Errorf("Curve - failed to get coins: %v", err_curvefi)
-					return err_curvefi
+		addr := common.HexToAddress(pool.Address)
+
+		tokenOutAddr, err := coinAddressFromPool(ctx, scraper.restClient, addr, outIdx)
+		if err != nil || tokenOutAddr == (common.Address{}) {
+			log.Errorf("Curve - failed to get coin address from pool: %v", err)
+			continue
+		}
+		if _, ok := assetMap[tokenOutAddr]; !ok {
+			if isNative(tokenOutAddr) {
+				assetMap[tokenOutAddr] = nativeAsset(scraper.exchange.Blockchain)
+			} else {
+				token0, err := models.GetAsset(tokenOutAddr, scraper.exchange.Blockchain, scraper.restClient)
+				if err != nil {
+					return err
 				}
+				assetMap[tokenOutAddr] = token0
 			}
-			coins = coins_curvefi[:]
-		case *curvefactory.Curvefactory:
-			coins_curvefactory, err_curvefactory := r.GetCoins(&bind.CallOpts{Context: context.Background()}, common.HexToAddress(pool.Address))
-			if err_curvefactory != nil {
-				log.Errorf("Curve - failed to get coins: %v", err_curvefactory)
-				return err_curvefactory
-			}
-			coins = coins_curvefactory[:]
-		default:
-			log.Fatal("Curve - unknown registry type")
 		}
 
-		if coins[outIdx] == (common.Address{}) || coins[inIdx] == (common.Address{}) {
-			log.Errorf("Curve - pool %s - empty coin at index out=%d or in=%d: %v", pool.Address, outIdx, inIdx, err)
-			return err
+		tokenInAddr, err := coinAddressFromPool(ctx, scraper.restClient, addr, inIdx)
+		if err != nil || tokenInAddr == (common.Address{}) {
+			log.Errorf("Curve - failed to get coin address from pool: %v", err)
+			continue
 		}
-
-		token0Address := coins[outIdx]
-		if _, ok := assetMap[token0Address]; !ok {
-			token0, err := models.GetAsset(token0Address, scraper.exchange.Blockchain, scraper.restClient)
-			if err != nil {
-				return err
+		if _, ok := assetMap[tokenInAddr]; !ok {
+			if isNative(tokenInAddr) {
+				assetMap[tokenInAddr] = nativeAsset(scraper.exchange.Blockchain)
+			} else {
+				token1, err := models.GetAsset(tokenInAddr, scraper.exchange.Blockchain, scraper.restClient)
+				if err != nil {
+					return err
+				}
+				assetMap[tokenInAddr] = token1
 			}
-			assetMap[token0Address] = token0
 		}
 
-		token1Address := coins[inIdx]
-		log.Infof("Curve - pool %s - token0Address: %s, token1Address: %s, outIdx: %d, inIdx: %d", pool.Address, token0Address.Hex(), token1Address.Hex(), outIdx, inIdx)
-		if _, ok := assetMap[token1Address]; !ok {
-			token1, err := models.GetAsset(token1Address, scraper.exchange.Blockchain, scraper.restClient)
-			if err != nil {
-				return err
-			}
-			assetMap[token1Address] = token1
-		}
-
-		scraper.poolMap[common.HexToAddress(pool.Address)] = CurvePair{
-			OutAsset: assetMap[token0Address],
-			InAsset:  assetMap[token1Address],
+		pair := CurvePair{
+			OutAsset: assetMap[tokenOutAddr],
+			InAsset:  assetMap[tokenInAddr],
 			OutIndex: outIdx,
 			InIndex:  inIdx,
-			Address:  common.HexToAddress(pool.Address),
+			Address:  addr,
 		}
+
+		scraper.poolMap[addr] = append(scraper.poolMap[addr], pair)
+		log.Infof("Curve - pool %v pair added: outIdx=%d(%v) inIdx=%d(%v)",
+			addr.Hex(), outIdx, tokenOutAddr.Hex(), inIdx, tokenInAddr.Hex())
 	}
 
 	return nil
+}
+
+func isNative(addr common.Address) bool {
+	return strings.EqualFold(addr.Hex(), NativeETHSentinel)
+}
+
+func nativeAsset(chain string) models.Asset {
+	return models.Asset{
+		Symbol:     "ETH",
+		Name:       "Ether",
+		Address:    NativeETHSentinel,
+		Decimals:   18,
+		Blockchain: chain,
+	}
 }
