@@ -45,6 +45,11 @@ type CurveSwap struct {
 	Amount1   float64
 }
 
+type poolSub struct {
+	cancel  context.CancelFunc
+	lastSub time.Time
+}
+
 type CurveScraper struct {
 	exchange         models.Exchange
 	poolMap          map[common.Address][]CurvePair
@@ -88,7 +93,8 @@ func NewCurveScraper(ctx context.Context, exchangeName string, blockchain string
 
 func (scraper *CurveScraper) mainLoop(ctx context.Context, pools []models.Pool, tradesChannel chan models.Trade, lock *sync.RWMutex) {
 	var wg sync.WaitGroup
-	seen := make(map[common.Address]bool) // to avoid duplicate pools
+	subs := make(map[common.Address]*poolSub)
+	seen := map[common.Address]bool{} // to avoid duplicate pools
 	for _, pool := range pools {
 		addr := common.HexToAddress(pool.Address)
 		if seen[addr] {
@@ -109,30 +115,61 @@ func (scraper *CurveScraper) mainLoop(ctx context.Context, pools []models.Pool, 
 		go watchdogPool(ctx, scraper.exchange.Name, addr, watchdogTicker, scraper.lastTradeTimeMap, watchdogDelay, scraper.subscribeChannel, lock)
 
 		time.Sleep(time.Duration(scraper.waitTime) * time.Millisecond)
+		subCtx, cancel := context.WithCancel(ctx)
 		wg.Add(1)
-		go func(ctx context.Context, address common.Address, w *sync.WaitGroup, lock *sync.RWMutex) {
-			defer w.Done()
-			scraper.watchSwaps(ctx, address, tradesChannel, lock)
-		}(ctx, addr, &wg, lock)
+		go func(address common.Address, cancel context.CancelFunc) {
+			defer wg.Done()
+			scraper.watchSwaps(subCtx, address, tradesChannel, lock)
+		}(addr, cancel)
+		subs[addr] = &poolSub{cancel: cancel, lastSub: time.Now()}
+		log.Infof("Curve - subscribed to pool: %s", addr.Hex())
 	}
-	active := seen
+
+	cooldown := 30 * time.Second
+
 	go func() {
 		for {
 			select {
 			case addr := <-scraper.subscribeChannel:
-				log.Infof("Resubscribing to pool: %s", addr.Hex())
-
 				lock.Lock()
-				if !active[addr] {
-					active[addr] = true
-					scraper.lastTradeTimeMap[addr] = time.Now()
-					go scraper.watchSwaps(ctx, addr, tradesChannel, lock)
-				} else {
-					log.Infof("Pool %s already active, skipping resubscription", addr.Hex())
+				ps := subs[addr]
+				if ps == nil {
+					subCtx, cancel := context.WithCancel(ctx)
+					wg.Add(1)
+					go func(address common.Address, cancel context.CancelFunc) {
+						defer wg.Done()
+						scraper.watchSwaps(subCtx, address, tradesChannel, lock)
+					}(addr, cancel)
+					subs[addr] = &poolSub{cancel: cancel, lastSub: time.Now()}
+					log.Infof("Initial subscription to pool: %s", addr.Hex())
+					lock.Unlock()
+					continue
 				}
+
+				if time.Since(ps.lastSub) < cooldown {
+					log.Infof("Pool %s already active, skipping resubscription", addr.Hex())
+					lock.Unlock()
+					continue
+				}
+				// Cancel the old subscription before starting a new one.
+				ps.cancel()
+				subCtx, cancel := context.WithCancel(ctx)
+				wg.Add(1)
+				go func(address common.Address, cancel context.CancelFunc) {
+					defer wg.Done()
+					scraper.watchSwaps(subCtx, address, tradesChannel, lock)
+				}(addr, cancel)
+				ps.cancel = cancel
+				ps.lastSub = time.Now()
+				log.Infof("Watchdog re-subscription to pool: %s", addr.Hex())
 				lock.Unlock()
 			case <-ctx.Done():
 				log.Info("Stopping resubscription handler.")
+				lock.Lock()
+				for _, ps := range subs {
+					ps.cancel()
+				}
+				lock.Unlock()
 				return
 			}
 		}
@@ -199,7 +236,6 @@ func (scraper *CurveScraper) watchSwaps(ctx context.Context, address common.Addr
 		log.Error("Curve - failed to get swaps channel: ", err)
 		return
 	}
-	log.Infof("Curve - subscribed to pool: %s", address.Hex())
 
 	go func() {
 		defer func() {
@@ -226,7 +262,6 @@ func (scraper *CurveScraper) watchSwaps(ctx context.Context, address common.Addr
 						log.Error("Curve - error normalizing swap: ", err)
 						continue
 					}
-					log.Warnf("poolMap: %v", scraper.poolMap)
 					pairs := scraper.poolMap[swap.addr]
 					if len(pairs) == 0 {
 						log.Errorf("Curve - no pairs found for address %s", swap.addr.Hex())
@@ -404,7 +439,7 @@ func (scraper *CurveScraper) watchSwaps(ctx context.Context, address common.Addr
 				scraper.subscribeChannel <- address
 				return
 			case <-ctx.Done():
-				log.Infof("Sutting down watchSwaps for %s", address.Hex())
+				log.Infof("Shutting down watchSwaps for %s", address.Hex())
 				return
 			}
 		}
