@@ -84,14 +84,6 @@ func NewMEXCScraper(ctx context.Context, pairs []models.ExchangePair, failoverCh
 				}
 				scraper.mu.Unlock()
 			}
-			// for _, c := range scraper.connections {
-			// 	scraper.mu.Lock()
-			// 	if err := c.wsConn.WriteJSON(pingMsg); err != nil {
-			// 		log.Error("ping error: ", err)
-			// 		return
-			// 	}
-			// 	scraper.mu.Unlock()
-			// }
 		}
 	}()
 
