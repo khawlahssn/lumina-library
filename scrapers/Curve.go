@@ -122,7 +122,6 @@ func (scraper *CurveScraper) mainLoop(ctx context.Context, pools []models.Pool, 
 			scraper.watchSwaps(subCtx, address, tradesChannel, lock)
 		}(addr, cancel)
 		subs[addr] = &poolSub{cancel: cancel, lastSub: time.Now()}
-		log.Infof("Curve - subscribed to pool: %s", addr.Hex())
 	}
 
 	cooldown := 30 * time.Second
@@ -147,7 +146,7 @@ func (scraper *CurveScraper) mainLoop(ctx context.Context, pools []models.Pool, 
 				}
 
 				if time.Since(ps.lastSub) < cooldown {
-					log.Infof("Pool %s already active, skipping resubscription", addr.Hex())
+					// Pool already active, skipping resubscription
 					lock.Unlock()
 					continue
 				}
@@ -256,7 +255,6 @@ func (scraper *CurveScraper) watchSwaps(ctx context.Context, address common.Addr
 			select {
 			case rawSwap, ok := <-feeds.Sink:
 				if ok {
-					log.Infof("Curve - received swap from sink: %v", rawSwap)
 					swap, err := scraper.extractSwapData(*rawSwap)
 					if err != nil {
 						log.Error("Curve - error normalizing swap: ", err)
@@ -298,7 +296,6 @@ func (scraper *CurveScraper) watchSwaps(ctx context.Context, address common.Addr
 				}
 			case rawSwapCurvefiFactory, ok := <-feeds.factorySink:
 				if ok {
-					log.Infof("Curve - received swap from factory sink: %v", rawSwapCurvefiFactory)
 					swap, err := scraper.extractSwapData(*rawSwapCurvefiFactory)
 					if err != nil {
 						log.Error("Curve - error normalizing swap: ", err)
@@ -340,7 +337,6 @@ func (scraper *CurveScraper) watchSwaps(ctx context.Context, address common.Addr
 				}
 			case rawSwapTwoCrypto, ok := <-feeds.twoSink:
 				if ok {
-					log.Infof("Curve - received swap from two crypto sink: %v", rawSwapTwoCrypto)
 					swap, err := scraper.extractSwapData(*rawSwapTwoCrypto)
 					if err != nil {
 						log.Error("Curve - error normalizing swap: ", err)
@@ -382,7 +378,6 @@ func (scraper *CurveScraper) watchSwaps(ctx context.Context, address common.Addr
 				}
 			case rawSwapUnderlying, ok := <-feeds.underlyingSink:
 				if ok {
-					log.Infof("Curve - received swap from underlying sink: %v", rawSwapUnderlying)
 					swap, err := scraper.extractSwapData(*rawSwapUnderlying)
 					if err != nil {
 						log.Error("Curve - error normalizing swap: ", err)
@@ -672,8 +667,6 @@ func (scraper *CurveScraper) makePoolMap(pools []models.Pool) error {
 		}
 
 		scraper.poolMap[addr] = append(scraper.poolMap[addr], pair)
-		log.Infof("Curve - pool %v pair added: outIdx=%d(%v) inIdx=%d(%v)",
-			addr.Hex(), outIdx, tokenOutAddr.Hex(), inIdx, tokenInAddr.Hex())
 	}
 
 	return nil
