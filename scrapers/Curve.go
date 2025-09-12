@@ -74,11 +74,11 @@ func NewCurveScraper(ctx context.Context, exchangeName string, blockchain string
 		log.Error("parse waitTime: ", err)
 	}
 
-	scraper.restClient, err = ethclient.Dial(utils.Getenv(CURVE_EXCHANGE+"_URI_REST", restDialCurve))
+	scraper.restClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(CURVE_EXCHANGE)+"_URI_REST", restDialCurve))
 	if err != nil {
 		log.Error("Curve - init rest client: ", err)
 	}
-	scraper.wsClient, err = ethclient.Dial(utils.Getenv(CURVE_EXCHANGE+"_URI_WS", wsDialCurve))
+	scraper.wsClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(CURVE_EXCHANGE)+"_URI_WS", wsDialCurve))
 	if err != nil {
 		log.Error("Curve - init ws client: ", err)
 	}
