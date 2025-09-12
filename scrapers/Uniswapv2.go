@@ -45,7 +45,6 @@ type UniswapSwap struct {
 	Amount0Out float64
 	Amount1In  float64
 	Amount1Out float64
-	Amount1    float64
 }
 
 type UniswapV2Scraper struct {
@@ -197,7 +196,6 @@ func (scraper *UniswapV2Scraper) ListenToPair(ctx context.Context, address commo
 					if err != nil {
 						log.Error("UniswapV2 - error normalizing swap: ", err)
 					}
-					log.Warnf("Swap: %v", swap)
 					price, volume := getSwapData(swap)
 					t := makeTradeUniswapV2(pair, price, volume, time.Unix(swap.Timestamp, 0), rawSwap.Raw.Address, swap.ID, scraper.exchange.Name, scraper.exchange.Blockchain)
 					lock.Lock()
@@ -231,8 +229,6 @@ func makeTradeUniswapV2(
 ) models.Trade {
 	token0 := pair.Token0
 	token1 := pair.Token1
-	log.Warnf("Token0: %v", token0)
-	log.Warnf("Token1: %v", token1)
 	return models.Trade{
 		Price:          price,
 		Volume:         volume,
