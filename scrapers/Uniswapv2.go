@@ -287,12 +287,20 @@ func (scraper *UniswapV2Scraper) normalizeUniswapSwap(swap uniswap.UniswapV2Pair
 }
 
 func getSwapData(swap UniswapSwap) (price float64, volume float64) {
+	// quote = token0, base = token1
+	dq := swap.Amount0Out - swap.Amount0In // quote net change
+	db := swap.Amount1Out - swap.Amount1In // base  net change
+
+	if db == 0 || dq == 0 {
+		return math.NaN(), 0
+	}
+
+	price = math.Abs(db) / math.Abs(dq)
+
 	if swap.Amount0In == float64(0) {
 		volume = swap.Amount0Out
-		price = swap.Amount1In / swap.Amount0Out
-		return
+	} else {
+		volume = -swap.Amount0In
 	}
-	volume = -swap.Amount0In
-	price = swap.Amount1Out / swap.Amount0In
 	return
 }
