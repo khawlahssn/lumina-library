@@ -68,7 +68,7 @@ func NewUniswapV2Scraper(ctx context.Context, exchangeName string, blockchain st
 	scraper.lastTradeTimeMap = make(map[common.Address]time.Time)
 	scraper.waitTime, err = strconv.Atoi(utils.Getenv(strings.ToUpper(exchangeName)+"_WAIT_TIME", "500"))
 	if err != nil {
-		log.Error("parse waitTime for exchange ", exchangeName, ": ", err)
+		log.Errorf("Failed to parse waitTime for exchange %s: %v", exchangeName, err)
 	}
 
 	scraper.restClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(UNISWAPV2_EXCHANGE)+"_URI_REST", restDial))
