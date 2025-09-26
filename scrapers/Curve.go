@@ -576,10 +576,11 @@ func (scraper *CurveScraper) GetSwapsChannel(address common.Address) (*curveFeed
 	}
 
 	var start *uint64
+	blocksToBackfill := uint64(20)
 	if hdr, err := scraper.restClient.HeaderByNumber(context.Background(), nil); err != nil {
 		log.Warnf("Curve - header fetch failed (%v), subscribe from latest (no backfill).", err)
-	} else if n := hdr.Number.Uint64(); n > 20 {
-		sb := n - 20
+	} else if n := hdr.Number.Uint64(); n > blocksToBackfill {
+		sb := n - blocksToBackfill
 		start = &sb
 	}
 
@@ -606,7 +607,7 @@ func (scraper *CurveScraper) GetSwapsChannel(address common.Address) (*curveFeed
 	}
 
 	if okCount == 0 {
-		return nil, fmt.Errorf("failed to subscribe to all channels")
+		return nil, fmt.Errorf("failed to establish any subscriptions")
 	}
 
 	return sinks, nil
