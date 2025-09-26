@@ -68,7 +68,7 @@ func NewUniswapV2Scraper(ctx context.Context, exchangeName string, blockchain st
 	scraper.lastTradeTimeMap = make(map[common.Address]time.Time)
 	scraper.waitTime, err = strconv.Atoi(utils.Getenv(strings.ToUpper(exchangeName)+"_WAIT_TIME", "500"))
 	if err != nil {
-		log.Error("parse waitTime: ", err)
+		log.Error("parse waitTime for exchange ", exchangeName, ": ", err)
 	}
 
 	scraper.restClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(UNISWAPV2_EXCHANGE)+"_URI_REST", restDial))
@@ -98,7 +98,7 @@ func (scraper *UniswapV2Scraper) mainLoop(ctx context.Context, pools []models.Po
 		envVar := strings.ToUpper(scraper.exchange.Name) + "_WATCHDOG_" + pool.Address
 		watchdogDelay, err := strconv.ParseInt(utils.Getenv(envVar, "600"), 10, 64)
 		if err != nil {
-			log.Errorf("UniswapV2 - Parse uniswapv2WatchdogDelay: %v.", err)
+			log.Errorf("UniswapV2 - Parse %s: %v.", envVar, err)
 		}
 		watchdogTicker := time.NewTicker(time.Duration(watchdogDelay) * time.Second)
 		go watchdogPool(ctx, scraper.exchange.Name, common.HexToAddress(pool.Address), watchdogTicker, scraper.lastTradeTimeMap, watchdogDelay, scraper.subscribeChannel, lock)
@@ -268,7 +268,8 @@ func (scraper *UniswapV2Scraper) GetSwapsChannel(pairAddress common.Address) (ch
 // normalizeUniswapSwap takes a swap as returned by the swap contract's channel and converts it to a UniswapSwap type
 func (scraper *UniswapV2Scraper) normalizeUniswapSwap(swap uniswap.UniswapV2PairSwap) (normalizedSwap UniswapSwap, err error) {
 	pair := scraper.poolMap[swap.Raw.Address]
-	decimals0, decimals1 := int(pair.Token0.Decimals), int(pair.Token1.Decimals)
+	decimals0 := int(pair.Token0.Decimals)
+	decimals1 := int(pair.Token1.Decimals)
 	amount0In, _ := new(big.Float).Quo(big.NewFloat(0).SetInt(swap.Amount0In), new(big.Float).SetFloat64(math.Pow10(decimals0))).Float64()
 	amount0Out, _ := new(big.Float).Quo(big.NewFloat(0).SetInt(swap.Amount0Out), new(big.Float).SetFloat64(math.Pow10(decimals0))).Float64()
 	amount1In, _ := new(big.Float).Quo(big.NewFloat(0).SetInt(swap.Amount1In), new(big.Float).SetFloat64(math.Pow10(decimals1))).Float64()
@@ -286,21 +287,14 @@ func (scraper *UniswapV2Scraper) normalizeUniswapSwap(swap uniswap.UniswapV2Pair
 	return
 }
 
+// getSwapData returns price, volume and sell/buy information of @swap
 func getSwapData(swap UniswapSwap) (price float64, volume float64) {
-	// quote = token0, base = token1
-	dq := swap.Amount0Out - swap.Amount0In // quote net change
-	db := swap.Amount1Out - swap.Amount1In // base  net change
-
-	if db == 0 || dq == 0 {
-		return math.NaN(), 0
-	}
-
-	price = math.Abs(db) / math.Abs(dq)
-
 	if swap.Amount0In == float64(0) {
 		volume = swap.Amount0Out
-	} else {
-		volume = -swap.Amount0In
+		price = swap.Amount1In / swap.Amount0Out
+		return
 	}
+	volume = -swap.Amount0In
+	price = swap.Amount1Out / swap.Amount0In
 	return
 }
