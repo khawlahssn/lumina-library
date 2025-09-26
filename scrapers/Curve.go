@@ -74,11 +74,11 @@ func NewCurveScraper(ctx context.Context, exchangeName string, blockchain string
 		log.Error("parse waitTime: ", err)
 	}
 
-	scraper.restClient, err = ethclient.Dial(utils.Getenv(CURVE_EXCHANGE+"_URI_REST", restDialCurve))
+	scraper.restClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(CURVE_EXCHANGE)+"_URI_REST", restDialCurve))
 	if err != nil {
 		log.Error("Curve - init rest client: ", err)
 	}
-	scraper.wsClient, err = ethclient.Dial(utils.Getenv(CURVE_EXCHANGE+"_URI_WS", wsDialCurve))
+	scraper.wsClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(CURVE_EXCHANGE)+"_URI_WS", wsDialCurve))
 	if err != nil {
 		log.Error("Curve - init ws client: ", err)
 	}
@@ -107,7 +107,7 @@ func (scraper *CurveScraper) mainLoop(ctx context.Context, pools []models.Pool, 
 		lock.Unlock()
 
 		envVar := strings.ToUpper(scraper.exchange.Name) + "_WATCHDOG_" + pool.Address
-		watchdogDelay, err := strconv.ParseInt(utils.Getenv(envVar, "60"), 10, 64)
+		watchdogDelay, err := strconv.ParseInt(utils.Getenv(envVar, "600"), 10, 64)
 		if err != nil {
 			log.Errorf("Curve - Parse curveWatchdogDelay: %v.", err)
 		}
