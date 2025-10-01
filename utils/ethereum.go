@@ -65,10 +65,10 @@ func MakeEthClient(mainNode string, backupNode string) (conn *ethclient.Client, 
 	} else {
 		syncProgress, err := conn.SyncProgress(context.Background())
 		if err != nil {
-			log.Warnf("main rpc node not able to get sync state: %v. Switch to backup node.", err)
+			log.Warnf("main rpc node %s not able to get sync state: %v. Switch to backup node.", mainNode, err)
 			useBackupNode = true
 		} else if syncProgress != nil {
-			log.Warnf("main rpc node not synced. Switch to backup node.")
+			log.Warnf("main rpc node %s not synced. Switch to backup node.", mainNode)
 			useBackupNode = true
 		}
 	}
@@ -76,17 +76,17 @@ func MakeEthClient(mainNode string, backupNode string) (conn *ethclient.Client, 
 	if useBackupNode {
 		conn, err = ethclient.Dial(backupNode)
 		if err != nil {
-			err = fmt.Errorf("failed to connect to the backup rpc node: %v", err)
+			err = fmt.Errorf("failed to connect to the backup rpc node %s: %v", backupNode, err)
 			return
 		}
 		var syncProgress *ethereum.SyncProgress
 		syncProgress, err = conn.SyncProgress(context.Background())
 		if err != nil {
-			err = fmt.Errorf("backup rpc node not able to get sync state: %v", err)
+			err = fmt.Errorf("backup rpc node %s not able to get sync state: %v", backupNode, err)
 			return
 		}
 		if syncProgress != nil {
-			err = errors.New("backup rpc node not synced")
+			err = fmt.Errorf("backup rpc node %s not synced", backupNode)
 			return
 		}
 	}
