@@ -35,6 +35,7 @@ type UniswapPair struct {
 	Token1      models.Asset
 	Address     common.Address
 	ForeignName string
+	Order       int
 }
 
 type UniswapSwap struct {
@@ -169,6 +170,7 @@ func (scraper *UniswapV2Scraper) makeUniPoolMap(pools []models.Pool) error {
 			Token0:      assetMap[token0Address],
 			Token1:      assetMap[token1Address],
 			ForeignName: assetMap[token0Address].Symbol + "-" + assetMap[token1Address].Symbol,
+			Order:       p.Order,
 		}
 	}
 	return nil
@@ -202,7 +204,18 @@ func (scraper *UniswapV2Scraper) ListenToPair(ctx context.Context, address commo
 					scraper.lastTradeTimeMap[rawSwap.Raw.Address] = t.Time
 					lock.Unlock()
 
-					tradesChannel <- t
+					switch pair.Order {
+					case 0:
+						tradesChannel <- t
+					case 1:
+						t.SwapTrade()
+						tradesChannel <- t
+					case 2:
+						logTrade(t)
+						tradesChannel <- t
+						t.SwapTrade()
+						tradesChannel <- t
+					}
 					logTradeUniswapV2(t)
 				}
 			case err := <-sub.Err():

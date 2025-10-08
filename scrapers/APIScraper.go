@@ -304,13 +304,15 @@ func RunScraper(
 		}
 
 	case UNISWAPV2_EXCHANGE:
-		NewUniswapV2Scraper(ctx, exchange, utils.ETHEREUM, pools, tradesChannel, wg)
+		NewUniswapV2Scraper(ctx, exchange, Exchanges[exchange].Blockchain, pools, tradesChannel, wg)
+	case UNISWAPV2_BASE_EXCHANGE:
+		NewUniswapV2Scraper(ctx, exchange, Exchanges[exchange].Blockchain, pools, tradesChannel, wg)
 	case UNISWAPV3_EXCHANGE:
-		NewUniswapV3Scraper(ctx, exchange, utils.ETHEREUM, pools, tradesChannel, wg)
+		NewUniswapV3Scraper(ctx, exchange, Exchanges[exchange].Blockchain, pools, tradesChannel, wg)
 	case PANCAKESWAPV3_EXCHANGE:
-		NewUniswapV3Scraper(ctx, exchange, utils.BINANCESMARTCHAIN, pools, tradesChannel, wg)
+		NewUniswapV3Scraper(ctx, exchange, Exchanges[exchange].Blockchain, pools, tradesChannel, wg)
 	case CURVE_EXCHANGE:
-		NewCurveScraper(ctx, exchange, utils.ETHEREUM, pools, tradesChannel, wg)
+		NewCurveScraper(ctx, exchange, Exchanges[exchange].Blockchain, pools, tradesChannel, wg)
 	}
 }
 
