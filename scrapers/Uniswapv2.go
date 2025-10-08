@@ -211,7 +211,7 @@ func (scraper *UniswapV2Scraper) ListenToPair(ctx context.Context, address commo
 						t.SwapTrade()
 						tradesChannel <- t
 					case 2:
-						logTrade(t)
+						logTradeUniswapV2(t)
 						tradesChannel <- t
 						t.SwapTrade()
 						tradesChannel <- t
