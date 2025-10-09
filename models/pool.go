@@ -26,7 +26,7 @@ type AssetVolume struct {
 	Index  uint8   `json:"Index"`
 }
 
-// m := MakePoolMap maps an exchange name on the underlying slice of pool structs.
+// MakePoolMap maps an exchange name on the underlying slice of pool structs.
 func MakePoolMap(pools []Pool) map[string][]Pool {
 	poolMap := make(map[string][]Pool)
 	for _, pool := range pools {

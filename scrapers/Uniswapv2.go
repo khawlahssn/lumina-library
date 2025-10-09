@@ -72,11 +72,11 @@ func NewUniswapV2Scraper(ctx context.Context, exchangeName string, blockchain st
 		log.Errorf("Failed to parse waitTime for exchange %s: %v", exchangeName, err)
 	}
 
-	scraper.restClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(UNISWAPV2_EXCHANGE)+"_URI_REST", restDial))
+	scraper.restClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(exchangeName)+"_URI_REST", restDial))
 	if err != nil {
 		log.Error("UniswapV2 - init rest client: ", err)
 	}
-	scraper.wsClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(UNISWAPV2_EXCHANGE)+"_URI_WS", wsDial))
+	scraper.wsClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(exchangeName)+"_URI_WS", wsDial))
 	if err != nil {
 		log.Error("UniswapV2 - init ws client: ", err)
 	}
@@ -206,17 +206,19 @@ func (scraper *UniswapV2Scraper) ListenToPair(ctx context.Context, address commo
 
 					switch pair.Order {
 					case 0:
+						logTradeUniswapV2(t)
 						tradesChannel <- t
 					case 1:
 						t.SwapTrade()
+						logTradeUniswapV2(t)
 						tradesChannel <- t
 					case 2:
 						logTradeUniswapV2(t)
 						tradesChannel <- t
 						t.SwapTrade()
+						logTradeUniswapV2(t)
 						tradesChannel <- t
 					}
-					logTradeUniswapV2(t)
 				}
 			case err := <-sub.Err():
 				log.Errorf("Subscription error for pool %s: %v", address.Hex(), err)
