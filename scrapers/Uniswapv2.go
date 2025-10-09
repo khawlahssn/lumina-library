@@ -35,6 +35,7 @@ type UniswapPair struct {
 	Token1      models.Asset
 	Address     common.Address
 	ForeignName string
+	Order       int
 }
 
 type UniswapSwap struct {
@@ -71,11 +72,11 @@ func NewUniswapV2Scraper(ctx context.Context, exchangeName string, blockchain st
 		log.Errorf("Failed to parse waitTime for exchange %s: %v", exchangeName, err)
 	}
 
-	scraper.restClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(UNISWAPV2_EXCHANGE)+"_URI_REST", restDial))
+	scraper.restClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(exchangeName)+"_URI_REST", restDial))
 	if err != nil {
 		log.Error("UniswapV2 - init rest client: ", err)
 	}
-	scraper.wsClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(UNISWAPV2_EXCHANGE)+"_URI_WS", wsDial))
+	scraper.wsClient, err = ethclient.Dial(utils.Getenv(strings.ToUpper(exchangeName)+"_URI_WS", wsDial))
 	if err != nil {
 		log.Error("UniswapV2 - init ws client: ", err)
 	}
@@ -169,6 +170,7 @@ func (scraper *UniswapV2Scraper) makeUniPoolMap(pools []models.Pool) error {
 			Token0:      assetMap[token0Address],
 			Token1:      assetMap[token1Address],
 			ForeignName: assetMap[token0Address].Symbol + "-" + assetMap[token1Address].Symbol,
+			Order:       p.Order,
 		}
 	}
 	return nil
@@ -202,8 +204,21 @@ func (scraper *UniswapV2Scraper) ListenToPair(ctx context.Context, address commo
 					scraper.lastTradeTimeMap[rawSwap.Raw.Address] = t.Time
 					lock.Unlock()
 
-					tradesChannel <- t
-					logTradeUniswapV2(t)
+					switch pair.Order {
+					case 0:
+						logTradeUniswapV2(t)
+						tradesChannel <- t
+					case 1:
+						t.SwapTrade()
+						logTradeUniswapV2(t)
+						tradesChannel <- t
+					case 2:
+						logTradeUniswapV2(t)
+						tradesChannel <- t
+						t.SwapTrade()
+						logTradeUniswapV2(t)
+						tradesChannel <- t
+					}
 				}
 			case err := <-sub.Err():
 				log.Errorf("Subscription error for pool %s: %v", address.Hex(), err)
